@@ -1,0 +1,60 @@
+---
+title: "ADNI Data Check"
+output: html_notebook
+---
+
+This [R Markdown](http://rmarkdown.rstudio.com) Notebook explores the various 
+available data for the NOTEPAD project. We want to determine the available
+longitudinal data for key biomarkers in cognitively unimpaired data. For this
+purpose, we will look at the following biomarkers:
+* tau PET
+* Amyloid PET
+* MRI measurements
+* plasma and CSF biomarkers 
+
+The first step is how many unimpaired individuals have followup data in
+each of these. We will start with the tables provided in ADNI, and then 
+move on to the actual imaging data. 
+
+```{r import}
+library(tidyverse)
+```
+
+Define some helpful globals
+```{r globals}
+adni_path <- "/Users/davecash/Library/CloudStorage/OneDrive-UniversityCollegeLondon/NOTEPAD/data/ADNI"
+```
+
+## Section 1 - TAU PET Data
+Load in the Tau PET data and tau QC data
+```{r read_tau}
+df_tau <- read_csv(file.path(adni_path,"UCBERKELEY_TAU_6MM_13Mar2025.csv")) %>% 
+  arrange(RID, SCANDATE) %>% 
+  select(RID,VISCODE,SITEID,SCANDATE,qc_flag,TRACER,META_TEMPORAL_SUVR,
+         META_TEMPORAL_VOLUME,CTX_ENTORHINAL_SUVR,CTX_ENTORHINAL_VOLUME)
+df_tau_meta <- read_csv(file.path(adni_path,"TAUMETA_13Mar2025.csv")) %>% 
+  arrange(RID, SCANDATE)
+df_tau_qc <- read_csv(file.path(adni_path,"TAUQC_13Mar2025.csv")) %>% 
+  arrange(RID, SCANDATE)
+df_dx <- read_csv(file.path(adni_path,"DXSUM_13Mar2025.csv")) %>% 
+  arrange(RID,EXAMDATE) %>% 
+  select(PHASE,RID,EXAMDATE,VISCODE,VISCODE2,DIAGNOSIS,DXNORM)
+
+
+```
+
+Now let's get some basic summary data - not very much MK data here
+Probably best to ignore for the time being.
+About 580 with cross-sectional and 470 ish with longitudinal
+```{r tau_info}
+count(df_tau,TRACER)
+count(df_tau,qc_flag)
+df_tau_group <- group_by(df_tau,RID) %>% 
+  mutate(ntp = n()) %>% filter(row_number()==1) %>% ungroup()
+count(df_tau_group,ntp)
+```
+Now how do these break down by baseline dx?
+```{r diagnosis}
+df_tau_dx <- left_join(df_tau,df_dx,by=c("RID","VISCODE"))
+```
+
