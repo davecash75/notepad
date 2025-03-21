@@ -30,7 +30,7 @@ parser = argparse.ArgumentParser(
     description='Import ADNI DICOM to NOTEPAD XNAT')
 parser.add_argument('--in_path', type=str,
                     required=True,
-                    help 'Path to session')
+                    help='Path to session')
 parser.add_argument('--in_study', type=str,
                     required=True,
                     help='Location of spreadsheet with study info')
@@ -38,9 +38,10 @@ parser.add_argument('--in_image', type=str,
                     required=True,
                     help='Location of spreadsheet with image info')
 parser.add_argument('--modality',type=str,
-                    choices=['mr','pt'],default='mr',
-                    help='Choose which imaging values to use mr or pt')
-
+                    choices=['MR','PET'],default='MR',
+                    help='Choose which imaging values to use MR or PET')
+parser.add_argument('--update',action='store_true',
+                    help='Update existing records if already on XNAT')
 args = parser.parse_args()
 
 # Some helpful globals
@@ -86,6 +87,7 @@ if not image_id:
     print(in_path)
     sys.exit(1)
 
+image_id = int(image_id.replace('I',''))
 print(f'Subject {subject_id}')
 print(f'Image {image_id}')
     
@@ -97,7 +99,7 @@ in_image = args.in_image
 # So first we are only going to keep a handful of columns
 df_image = pd.read_csv(in_image,
                      low_memory = False)
-if (args.modality=='mr'):
+if (args.modality=='MR'):
     keep_cols = [
         'image_id','subject_id','study_id','mri_visit',
         'mri_date','mri_description','mri_thickness',
@@ -122,7 +124,7 @@ else:
         ]
     df_image = df_image[keep_cols]
     df_image = df_image.rename(
-        columns={'pet_visit': 'pet_visit',
+        columns={'pet_visit': 'image_visit',
                  'pet_date': 'image_date'}
         )
     # Remove FDG and PIB (for time being)
@@ -131,6 +133,18 @@ else:
 
 # Load in the data from the info sheet
 df_info = pd.read_csv(in_study)
+
+# A bit of cleaning up on the racial category
+# So that it will map properly
+df_info.loc[df_info['PTRACCAT']=='9','PTRACCAT'] = 7
+df_info.loc[df_info['PTRACCAT']=='1|4','PTRACCAT'] = 6
+df_info.loc[df_info['PTRACCAT']=='1|5','PTRACCAT'] = 6
+df_info.loc[df_info['PTRACCAT']=='4|5','PTRACCAT'] = 6
+df_info.loc[df_info['PTRACCAT']=='2|4','PTRACCAT'] = 6
+df_info.loc[df_info['PTRACCAT']=='3|4|5','PTRACCAT'] = 6
+df_info['PTRACCAT'] = pd.to_numeric(df_info['PTRACCAT'])
+
+
 df_info['PTETHCAT_STR'] = df_info['PTETHCAT'].map(ethnicity_map)
 df_info['PTRACCAT_STR'] = df_info['PTRACCAT'].map(race_map)
 df_info['PTGENDER_STR'] = df_info['PTGENDER'].map(gender_map)
@@ -161,7 +175,8 @@ if not yob_constant or not gender_constant or \
         ])
 # Unless I get a bunch of these, I'm going to assume
 # first row is OK
-first_row = df_subject_demog[0]
+first_row = df_subject_demog.iloc[0]
+print(first_row)
 in_yob = first_row['PTDOBYY']
 in_gender = first_row['PTGENDER_STR']
 in_ethnicity = first_row['PTETHCAT_STR']
@@ -169,13 +184,19 @@ in_race = first_row['PTRACCAT_STR']
 in_education = first_row['PTEDUCAT']
 in_apoe = first_row['GENOTYPE'].replace("/","_")
 
-df_image = df_info.loc[df_info['subject_id']==subject_id & df_info['image_id']==image_id ]
-visit_id = df_image['visit']
+df_session = df_info.loc[(df_info['subject_id']==subject_id) & (df_info['image_id']==image_id) ].squeeze()
+print(df_session)
+visit_id = df_session['visit']
 print(f'Subject: {subject_id}')
 print(f'Visit: {visit_id}')
-session_id = f"{subject_id}-{image_id}"
-
-with xnat.connect(xnat_host, extension_types=False) as xnat_session:
+if args.modality == "MR":
+    session_id = f"{subject_id}-{visit_id}-{args.modality}"
+else:
+    radiopharm = df_session['pet_radiopharm']
+    session_id = f"{subject_id}-{visit_id}-{args.modality}-{radiopharm}"
+    
+# Only keeping the verify=False in temporarily for testing
+with xnat.connect(xnat_host, extension_types=False, verify=False) as xnat_session:
     # Get list of subjects for the project. 
     xnat_project = xnat_session.projects[notepad_project]
     xnat_subjects = xnat_project.subjects
@@ -195,10 +216,26 @@ with xnat.connect(xnat_host, extension_types=False) as xnat_session:
             "xnat:subjectData/fields/field[name=apoe]/field": in_apoe
         }   
         xnat_session.put(
-            data=f"data/projects/{notepad_project}/subjects/{subject_id}",
+            path=f"/data/projects/{notepad_project}/subjects/{subject_id}",
             query=apoe_string
             )
         # new_subject.custom_variables['default']['APOE'] = in_apoe
+    elif args.update:
+        update_subject = xnat_subjects[subject_id]
+        update_subject.demographics.yob = in_yob
+        update_subject.demographics.gender = in_gender
+        update_subject.demographics.ethnicity = in_ethnicity
+        update_subject.demographics.education=in_education
+        update_subject.demographics.race = in_race
+        # This command will have to happen after upgrade or via REST call 
+        apoe_string = {
+            "xnat:subjectData/fields/field[name=apoe]/field": in_apoe
+        }   
+        xnat_session.put(
+            path=f"/data/projects/{notepad_project}/subjects/{subject_id}",
+            query=apoe_string
+            )
+ 
 
     # IMPORT SESSION
     # Need to generate a session tag from subject and visit
@@ -217,7 +254,8 @@ with xnat.connect(xnat_host, extension_types=False) as xnat_session:
             )
         # Zip the path up to somewhere temporary
         prearchive_session = xnat_session.services.import_(
-            import_zip, project=notepad_project, 
+            import_zip, project=notepad_project, subject=subject_id,
+            experiment=session_id,
             destination='/prearchive')
     
     # TO DO: BIDS CONVERT
