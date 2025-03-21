@@ -1,6 +1,7 @@
 import sys
 import re
 from pathlib import Path
+import tempfile
 import shutil
 import argparse
 import pandas as pd
@@ -130,17 +131,19 @@ else:
     # Remove FDG and PIB (for time being)
     df_image = df_image.loc[df_image["pet_radiopharm"]!="18F-FDG"]
     df_image = df_image.loc[df_image["pet_radiopharm"]!="11C-PIB"]
+df_image = df_image.sort_values(by=['subject_id','image_date'])
 
 # Load in the data from the info sheet
 df_info = pd.read_csv(in_study)
-
+df_info = df_info.sort_values(by=['subject_id','visit'])
 # A bit of cleaning up on the racial category
 # So that it will map properly
 df_info.loc[df_info['PTRACCAT']=='9','PTRACCAT'] = 7
 df_info.loc[df_info['PTRACCAT']=='1|4','PTRACCAT'] = 6
 df_info.loc[df_info['PTRACCAT']=='1|5','PTRACCAT'] = 6
-df_info.loc[df_info['PTRACCAT']=='4|5','PTRACCAT'] = 6
 df_info.loc[df_info['PTRACCAT']=='2|4','PTRACCAT'] = 6
+df_info.loc[df_info['PTRACCAT']=='2|5','PTRACCAT'] = 6
+df_info.loc[df_info['PTRACCAT']=='4|5','PTRACCAT'] = 6
 df_info.loc[df_info['PTRACCAT']=='3|4|5','PTRACCAT'] = 6
 df_info['PTRACCAT'] = pd.to_numeric(df_info['PTRACCAT'])
 
@@ -192,7 +195,7 @@ print(f'Visit: {visit_id}')
 if args.modality == "MR":
     session_id = f"{subject_id}-{visit_id}-{args.modality}"
 else:
-    radiopharm = df_session['pet_radiopharm']
+    radiopharm = df_session['pet_radiopharm'].replace('18F-','')
     session_id = f"{subject_id}-{visit_id}-{args.modality}-{radiopharm}"
     
 # Only keeping the verify=False in temporarily for testing
@@ -249,14 +252,19 @@ with xnat.connect(xnat_host, extension_types=False, verify=False) as xnat_sessio
     #)
     xnat_img_sessions = xnat_subjects[subject_id].experiments
     if session_id not in xnat_img_sessions:
-        import_zip = shutil.make_archive(
-            '/tmp/upload', format='zip', root_dir=str(in_path)
-            )
-        # Zip the path up to somewhere temporary
-        prearchive_session = xnat_session.services.import_(
-            import_zip, project=notepad_project, subject=subject_id,
-            experiment=session_id,
-            destination='/prearchive')
+        print(f"New session {session_id}")
+    else:
+        print(f"Adding another scan to {session_id}")
+    tempzip = tempfile.NamedTemporaryFile()
+    # Zip the path up to somewhere temporary
+    import_zip = shutil.make_archive(
+        tempzip.name, format='zip', root_dir=str(in_path)
+    )
+    archive_session = xnat_session.services.import_(
+        import_zip, project=notepad_project, subject=subject_id,
+        experiment=session_id)
+    tempzip.close()
+    
     
     # TO DO: BIDS CONVERT
     # This will need the file archived. 
