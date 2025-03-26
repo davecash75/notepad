@@ -18,6 +18,7 @@ move on to the actual imaging data.
 
 ```{r import}
 library(tidyverse)
+library(arsenal)
 ```
 
 Define some helpful globals
@@ -50,11 +51,50 @@ About 580 with cross-sectional and 470 ish with longitudinal
 count(df_tau,TRACER)
 count(df_tau,qc_flag)
 df_tau_group <- group_by(df_tau,RID) %>% 
-  mutate(ntp = n()) %>% filter(row_number()==1) %>% ungroup()
-count(df_tau_group,ntp)
+  mutate(ntp = n()) 
+df_tau_bl <- filter(df_tau_group,row_number()==1) %>% ungroup()
+count(df_tau_bl,ntp)
+df_long_tau <- filter(df_tau_group,ntp > 1) %>% ungroup()
 ```
 Now how do these break down by baseline dx?
 ```{r diagnosis}
-df_tau_dx <- left_join(df_tau,df_dx,by=c("RID","VISCODE"))
-```
+df_tau_dx <- left_join(df_tau,df_dx,by=c("RID","VISCODE")) %>% 
+  group_by(RID) %>% mutate(baseline_dx = first(DIAGNOSIS))
+df_tau_dx_bl <- filter(df_tau_dx,row_number()==1) %>%  ungroup()
+count(df_tau_dx_bl, baseline_dx)
 
+df_long_tau_dx <- left_join(df_long_tau,df_dx,by=c("RID","VISCODE")) %>% 
+  group_by(RID) %>% mutate(baseline_dx = first(DIAGNOSIS))
+df_long_tau_dx_bl <- filter(df_long_tau_dx,row_number()==1) %>%  ungroup()
+count(df_long_tau_dx_bl, baseline_dx)
+
+a<-arsenal::tableby(baseline_dx ~ as.factor(ntp), data=df_long_tau_dx_bl) 
+summary(a)
+```
+``` {r av45}
+df_amy <- read_csv(file.path(adni_path,"UCBERKELEY_AMY_6MM_13Mar2025.csv")) %>% 
+  arrange(RID, SCANDATE) %>% 
+  select(RID,VISCODE,SITEID,SCANDATE,qc_flag,TRACER,AMYLOID_STATUS,
+         CENTILOIDS,SUMMARY_SUVR)
+
+count(df_amy,TRACER)
+count(df_amy,qc_flag)
+df_amy_group <- group_by(df_amy,RID) %>% 
+  mutate(ntp = n()) 
+df_amy_bl <- filter(df_amy_group,row_number()==1) %>% ungroup()
+count(df_amy_bl,ntp)
+df_long_amy <- filter(df_amy_group,ntp > 1) %>% ungroup()
+
+df_amy_dx <- left_join(df_amy,df_dx,by=c("RID","VISCODE")) %>% 
+  group_by(RID) %>% mutate(baseline_dx = first(DIAGNOSIS))
+df_amy_dx_bl <- filter(df_amy_dx,row_number()==1) %>%  ungroup()
+count(df_amy_dx_bl, baseline_dx)
+
+df_long_amy_dx <- left_join(df_long_amy,df_dx,by=c("RID","VISCODE")) %>% 
+  group_by(RID) %>% mutate(baseline_dx = first(DIAGNOSIS))
+df_long_amy_dx_bl <- filter(df_long_amy_dx,row_number()==1) %>%  ungroup()
+count(df_long_amy_dx_bl, baseline_dx)
+
+a<-arsenal::tableby(baseline_dx ~ as.factor(ntp), data=df_long_amy_dx_bl) 
+summary(a)
+```
