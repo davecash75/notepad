@@ -1,0 +1,55 @@
+---
+title: "A4 Learn Data check"
+output: html_notebook
+---
+
+This [R Markdown](http://rmarkdown.rstudio.com) Notebook explores the various 
+available data for the NOTEPAD project. We want to determine the available
+longitudinal data for key biomarkers in cognitively unimpaired data. For this
+purpose, we will look at the following biomarkers:
+* tau PET
+* Amyloid PET
+* MRI measurements
+* plasma and CSF biomarkers 
+
+The first step is how many unimpaired individuals have followup data in
+each of these. We will start with the tables provided in ADNI, and then 
+move on to the actual imaging data. 
+
+```{r import}
+library(tidyverse)
+library(arsenal)
+```
+
+
+Define some helpful globals
+```{r globals}
+a4_path <- "/Users/davecash/Library/CloudStorage/OneDrive-UniversityCollegeLondon/NOTEPAD/data/A4_LEARN"
+```
+
+## Section 1 - TAU PET Data
+Load in the Tau PET data and tau QC data
+```{r read_dfs}
+df_subject <- read_csv(file.path(a4_path,"Derived Data", "SUBJINFO.csv"))
+df_amy <- read_csv(file.path(a4_path,"External Data", "imaging_SUVR_amyloid.csv")) %>% 
+  filter(brain_region=="Composite_Summary" | brain_region=="lprecuneus_gm") %>% 
+  pivot_wider(names_from=brain_region, values_from=suvr_cer) %>% 
+  select(-c("suvr_persi","suvr_crus"))
+df_tau <- read_csv(file.path(a4_path,"External Data", "imaging_SUVR_tau.csv")) %>% 
+  filter(brain_region=="MUBADA Mask" | brain_region=="EarlyTau_VOI") %>% 
+  pivot_wider(names_from=brain_region, values_from=c("suvr_persi","suvr_crus")) %>% 
+  select(-suvr_cer)
+
+```
+``` {r count_tp}
+df_tau_group <- group_by(df_tau,BID) %>% 
+  mutate(ntp = n()) 
+df_tau_bl <- filter(df_tau_group,row_number()==1) %>% ungroup()
+count(df_tau_bl,ntp)
+
+df_amy_group <- group_by(df_amy,BID) %>% 
+  mutate(ntp = n()) 
+df_amy_bl <- filter(df_amy_group,row_number()==1) %>% ungroup()
+count(df_amy_bl,ntp)
+
+```
