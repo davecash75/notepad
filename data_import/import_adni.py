@@ -1,54 +1,39 @@
 import sys
 import re
 from pathlib import Path
-import tempfile
+from zipfile import ZipFile
 import shutil
 import argparse
 import pandas as pd
+import pydicom as dcm
 import xnat 
 import heudiconv
 
-def extract_from_path(input_path,input_pattern):
-    out_key = None 
-    # Parse the path to get the subject ID and image ID
-    path_parts = input_path.parts
-    for p in path_parts:
-        if re.match(input_pattern,p):
-            out_key = p
-            return out_key
-
-# This program will take in data from 
-# DICOM and use DICOM Inbox to import
-# to archive the data into XNAT
-# How to track whats been uploaded effectively
-# The process will be
-# 1. Look at a directory (whether command line or spreadsheet)
-# 2. Is there a subject for this directory? If not create it using key demographic data
-# 3. Is there a session matching this directory? If not DICOM inbox it
-# 4. Is there BIDS for this directory? If not heudiconv it
-# For steps 3 and 4 - allow for an overwrite
-parser = argparse.ArgumentParser(
-    description='Import ADNI DICOM to NOTEPAD XNAT')
-parser.add_argument('--in_path', type=str,
-                    required=True,
-                    help='Path to session')
-parser.add_argument('--in_study', type=str,
-                    required=True,
-                    help='Location of spreadsheet with study info')
-parser.add_argument('--in_image', type=str,
-                    required=True,
-                    help='Location of spreadsheet with image info')
-parser.add_argument('--modality',type=str,
-                    choices=['MR','PET'],default='MR',
-                    help='Choose which imaging values to use MR or PET')
-parser.add_argument('--update',action='store_true',
-                    help='Update existing records if already on XNAT')
-args = parser.parse_args()
-
 # Some helpful globals
+# Host for the xnat where data is going
 xnat_host = "https://xnat-srv.drc.ion.ucl.ac.uk"
+# Project for data
 notepad_project = "NOTEPAD_ADNI"
+# Regex patterns to parse Subject and Image ID from paths
+subject_id_pattern = re.compile(r"^\d{3}_S_\d{4}$")
+image_id_pattern = re.compile(r"^I\d+$")
+file_pattern = re.compile(r"^ADNI_(\d{3}_S_\d{4})_.*_S(\d+)_I(\d+).[dn].*")
 
+# Which columns from ADNI MRI and PET spreadsheets should be kept
+mr_keep_cols = [
+            'image_id','subject_id','study_id','mri_visit',
+            'mri_date','mri_description','mri_thickness',
+            'mri_mfr','mri_mfr_model','mri_field_str'
+            ]
+
+pet_keep_cols = [
+            'image_id','subject_id','study_id','pet_visit',
+            'pet_date','pet_description','pet_mfr',
+            'pet_mfr_model','pet_radiopharm'
+            ]
+
+# Dictionaries to encode integers into correct strings
+# For gender, ethnicity, race
 gender_map = {
     1 : 'male',
     2 : 'female'
@@ -70,205 +55,325 @@ race_map = {
     7: "Unknown"
 }
 
-# Parse path to get subject ID and image ID 
-in_path = Path(args.in_path)
-subject_id_pattern = re.compile(r"^\d{3}_S_\d{4}$")
-subject_id = extract_from_path(in_path,subject_id_pattern)
+# Make a main here
 
-if subject_id is None:
-    print("Could not identify subject from path")
-    print(in_path)
-    sys.exit(1)
+# This just extracts the bit of path that matches the pattern
+# and returns it
+def extract_from_path(input_path,input_pattern):
+    out_key = None 
+    # Parse the path to get the subject ID and image ID
+    path_parts = input_path.parts
+    for p in path_parts:
+        if re.match(input_pattern,p):
+            out_key = p
+            return out_key
 
-image_id_pattern = re.compile(r"^I\d+$")
-image_id = extract_from_path(in_path,image_id_pattern)
-    
-if not image_id:
-    print("Could not identify image from path")
-    print(in_path)
-    sys.exit(1)
+# This processes the study sheet of subject metadata
+def process_study_sheet(img_info):
+    df_info = pd.read_csv(img_info)
+    df_info = df_info.sort_values(by=['subject_id','visit'])
+    # A bit of cleaning up on the racial category
+    # So that it will map properly
+    df_info.loc[df_info['PTRACCAT']=='9','PTRACCAT'] = 7
+    df_info.loc[df_info['PTRACCAT']=='1|4','PTRACCAT'] = 6
+    df_info.loc[df_info['PTRACCAT']=='1|5','PTRACCAT'] = 6
+    df_info.loc[df_info['PTRACCAT']=='2|4','PTRACCAT'] = 6
+    df_info.loc[df_info['PTRACCAT']=='2|5','PTRACCAT'] = 6
+    df_info.loc[df_info['PTRACCAT']=='4|5','PTRACCAT'] = 6
+    df_info.loc[df_info['PTRACCAT']=='3|4|5','PTRACCAT'] = 6
+    df_info['PTRACCAT'] = pd.to_numeric(df_info['PTRACCAT'])
+    df_info['PTETHCAT_STR'] = df_info['PTETHCAT'].map(ethnicity_map)
+    df_info['PTRACCAT_STR'] = df_info['PTRACCAT'].map(race_map)
+    df_info['PTGENDER_STR'] = df_info['PTGENDER'].map(gender_map)
+    return df_info
 
-image_id = int(image_id.replace('I',''))
-print(f'Subject {subject_id}')
-print(f'Image {image_id}')
-    
+# This processes the imaging metadata sheet
+def process_image_sheet(img_study,modality):
+    # Load in the MRI data - it's a lot of lot of data
+    # So first we are only going to keep a handful of columns
+    df_image = pd.read_csv(img_study,low_memory = False)
+    if (modality=='MR'):
+        df_image = df_image[mr_keep_cols]
+        df_image = df_image.rename(
+            columns={'mri_visit': 'image_visit',
+                    'mri_date': 'image_date'}
+            )        
+        # Keeping only 3T data (some rando scans with field strength 2.89)
+        # And all of the MPRAGE have slice thicknesses less than 1.3
+        df_image = df_image.loc[df_image["mri_field_str"]>2.5]
+        df_image = df_image.loc[df_image["mri_thickness"]<1.3]
 
-in_study = args.in_study
-in_image = args.in_image
-
-# Load in the MRI data - it's a lot of lot of data
-# So first we are only going to keep a handful of columns
-df_image = pd.read_csv(in_image,
-                     low_memory = False)
-if (args.modality=='MR'):
-    keep_cols = [
-        'image_id','subject_id','study_id','mri_visit',
-        'mri_date','mri_description','mri_thickness',
-        'mri_mfr','mri_mfr_model','mri_field_str'
-        ]
-    df_image = df_image[keep_cols]
-    df_image = df_image.rename(
-        columns={'mri_visit': 'image_visit',
-                 'mri_date': 'image_date'}
-        )
-    
-    # Keeping only 3T data (some rando scans with field strength 2.89)
-    # And all of the MPRAGE have slice thicknesses less than 1.3
-    df_image = df_image.loc[df_image["mri_field_str"]>2.5]
-    df_image = df_image.loc[df_image["mri_thickness"]<1.3]
-
-else:
-    keep_cols = [
-        'image_id','subject_id','study_id','pet_visit',
-        'pet_date','pet_description','pet_mfr',
-        'pet_mfr_model','pet_radiopharm'
-        ]
-    df_image = df_image[keep_cols]
-    df_image = df_image.rename(
-        columns={'pet_visit': 'image_visit',
-                 'pet_date': 'image_date'}
-        )
-    # Remove FDG and PIB (for time being)
-    df_image = df_image.loc[df_image["pet_radiopharm"]!="18F-FDG"]
-    df_image = df_image.loc[df_image["pet_radiopharm"]!="11C-PIB"]
-df_image = df_image.sort_values(by=['subject_id','image_date'])
-
-# Load in the data from the info sheet
-df_info = pd.read_csv(in_study)
-df_info = df_info.sort_values(by=['subject_id','visit'])
-# A bit of cleaning up on the racial category
-# So that it will map properly
-df_info.loc[df_info['PTRACCAT']=='9','PTRACCAT'] = 7
-df_info.loc[df_info['PTRACCAT']=='1|4','PTRACCAT'] = 6
-df_info.loc[df_info['PTRACCAT']=='1|5','PTRACCAT'] = 6
-df_info.loc[df_info['PTRACCAT']=='2|4','PTRACCAT'] = 6
-df_info.loc[df_info['PTRACCAT']=='2|5','PTRACCAT'] = 6
-df_info.loc[df_info['PTRACCAT']=='4|5','PTRACCAT'] = 6
-df_info.loc[df_info['PTRACCAT']=='3|4|5','PTRACCAT'] = 6
-df_info['PTRACCAT'] = pd.to_numeric(df_info['PTRACCAT'])
-
-
-df_info['PTETHCAT_STR'] = df_info['PTETHCAT'].map(ethnicity_map)
-df_info['PTRACCAT_STR'] = df_info['PTRACCAT'].map(race_map)
-df_info['PTGENDER_STR'] = df_info['PTGENDER'].map(gender_map)
-
-# Now merge the two
-df_info = pd.merge(df_info,df_image,
-                   left_on=['subject_id','visit'],
-                   right_on=['subject_id','image_visit'],
-                   how='outer')
-
-
-# Find the rows that matches the subject and scan
-df_subject = df_info.loc[df_info['subject_id']==subject_id]
-df_subject_demog = df_subject.dropna(subset='PTDOBYY')
-yob_constant = df_subject_demog['PTDOBYY'].all()
-gender_constant = df_subject_demog['PTGENDER'].all()
-ethnicity_constant = df_subject_demog['PTETHCAT'].all()
-race_constant = df_subject_demog['PTRACCAT'].all()
-education_constant = df_subject_demog['PTEDUCAT'].all()
-if not yob_constant or not gender_constant or \
-    not ethnicity_constant or not race_constant or \
-    not education_constant:
-        print("Inconsistent subject level variables")
-        print(df_subject_demog.loc[:,
-            ["subject_id","visit","PTDOBYY",
-             "PTEDUCAT","PTGENDER","PTETHCAT",
-             "PTRACCAT"]
-        ])
-# Unless I get a bunch of these, I'm going to assume
-# first row is OK
-first_row = df_subject_demog.iloc[0]
-print(first_row)
-in_yob = first_row['PTDOBYY']
-in_gender = first_row['PTGENDER_STR']
-in_ethnicity = first_row['PTETHCAT_STR']
-in_race = first_row['PTRACCAT_STR']
-in_education = first_row['PTEDUCAT']
-in_apoe = first_row['GENOTYPE'].replace("/","_")
-
-df_session = df_info.loc[(df_info['subject_id']==subject_id) & (df_info['image_id']==image_id) ].squeeze()
-print(df_session)
-visit_id = df_session['visit']
-print(f'Subject: {subject_id}')
-print(f'Visit: {visit_id}')
-if args.modality == "MR":
-    session_id = f"{subject_id}-{visit_id}-{args.modality}"
-else:
-    radiopharm = df_session['pet_radiopharm'].replace('18F-','')
-    session_id = f"{subject_id}-{visit_id}-{args.modality}-{radiopharm}"
-    
-# Only keeping the verify=False in temporarily for testing
-with xnat.connect(xnat_host, extension_types=False, verify=False) as xnat_session:
-    # Get list of subjects for the project. 
-    xnat_project = xnat_session.projects[notepad_project]
-    xnat_subjects = xnat_project.subjects
-    if subject_id not in xnat_subjects:
-        # This needs key demographics
-        print(f"Creating subject {subject_id}")
-        new_subject = xnat_session.classes.SubjectData(
-            parent=xnat_project, 
-            label=subject_id)
-        new_subject.demographics.yob = in_yob
-        new_subject.demographics.gender = in_gender
-        new_subject.demographics.ethnicity = in_ethnicity
-        new_subject.demographics.education=in_education
-        new_subject.demographics.race = in_race
-        # This command will have to happen after upgrade or via REST call 
-        apoe_string = {
-            "xnat:subjectData/fields/field[name=apoe]/field": in_apoe
-        }   
-        xnat_session.put(
-            path=f"/data/projects/{notepad_project}/subjects/{subject_id}",
-            query=apoe_string
-            )
-        # new_subject.custom_variables['default']['APOE'] = in_apoe
-    elif args.update:
-        update_subject = xnat_subjects[subject_id]
-        update_subject.demographics.yob = in_yob
-        update_subject.demographics.gender = in_gender
-        update_subject.demographics.ethnicity = in_ethnicity
-        update_subject.demographics.education=in_education
-        update_subject.demographics.race = in_race
-        # This command will have to happen after upgrade or via REST call 
-        apoe_string = {
-            "xnat:subjectData/fields/field[name=apoe]/field": in_apoe
-        }   
-        xnat_session.put(
-            path=f"/data/projects/{notepad_project}/subjects/{subject_id}",
-            query=apoe_string
-            )
- 
-
-    # IMPORT SESSION
-    # Need to generate a session tag from subject and visit
-    # This command will have to happen after upgrade of XNAT
-    # You may have to DICOM push these for the time being    
-    #xnat_session.services.import_dicom_inbox(
-    #    path=in_path,
-    #    project=notepad_project,
-    #    subject=subject_id,
-    #    experiment=in_session,
-    #)
-    xnat_img_sessions = xnat_subjects[subject_id].experiments
-    if session_id not in xnat_img_sessions:
-        print(f"New session {session_id}")
     else:
-        print(f"Adding another scan to {session_id}")
-    tempzip = tempfile.NamedTemporaryFile()
-    # Zip the path up to somewhere temporary
-    import_zip = shutil.make_archive(
-        tempzip.name, format='zip', root_dir=str(in_path)
-    )
-    archive_session = xnat_session.services.import_(
-        import_zip, project=notepad_project, subject=subject_id,
-        experiment=session_id)
-    tempzip.close()
-    
-    
-    # TO DO: BIDS CONVERT
-    # This will need the file archived. 
-    # Will wait to see that DICOM is sorted before adding
+        df_image = df_image[pet_keep_cols]
+        df_image = df_image.rename(
+            columns={'pet_visit': 'image_visit',
+                    'pet_date': 'image_date'}
+            )
+        # Remove FDG and PIB (for time being)
+        df_image = df_image.loc[df_image["pet_radiopharm"]!="18F-FDG"]
+        df_image = df_image.loc[df_image["pet_radiopharm"]!="11C-PIB"]
+    df_image = df_image.sort_values(by=['subject_id','image_date'])
+    df_image.set_index('image_id')
+    return df_image
+
+# Refactor: Look at a whole subject's data
+# Group the scans by study into one Zip file
+# To avoid issues around Autorun and double archive
+# Specify the PATH and the subject ID
+# Remove .dcm files when done, but keep Nifti for now.
+
+
+
+# This program will take in data from 
+# DICOM and use DICOM Inbox to import
+# to archive the data into XNAT
+# How to track whats been uploaded effectively
+# The process will be
+# 1. Look at a directory (whether command line or spreadsheet)
+# 2. Is there a subject for this directory? If not create it using key demographic data
+# 3. Is there a session matching this directory? If not DICOM inbox it
+# 4. Is there BIDS for this directory? If not heudiconv it
+# For steps 3 and 4 - allow for an overwrite
+def main():
+
+    parser = argparse.ArgumentParser(
+        description='Import ADNI DICOM to NOTEPAD XNAT')
+    parser.add_argument('--in_path', type=str,
+                        required=True,
+                        help='Path to subject to upload')
+    parser.add_argument('--mr_study', type=str,
+                        required=True,
+                        help='Location of spreadsheet with study info for visits with MR data')
+    parser.add_argument('--mr_image', type=str,
+                        required=True,
+                        help='Location of spreadsheet with image info for visits with MR data')
+    parser.add_argument('--pet_study', type=str,
+                        required=True,
+                        help='Location of spreadsheet with study info for visits with PET data')
+    parser.add_argument('--pet_image', type=str,
+                        required=True,
+                        help='Location of spreadsheet with image info for visits with PET data')
+    parser.add_argument('--update',action='store_true',
+                        help='Update existing records if already on XNAT')
+    args = parser.parse_args()
+
+
+    # Parse path to get subject ID and image ID 
+    in_path = Path(args.in_path)
+    subject_id = extract_from_path(in_path,subject_id_pattern)
+
+    if subject_id is None:
+        print("Could not identify subject from path")
+        print(in_path)
+        sys.exit(1)
+
+    # Now we need to identify:
+    # What images are DICOM and what are Nifti
+    # Which ones are PET and which ones are MRI
+    image_id_list = []
+
+    nii_files = in_path.glob('**/*.nii.gz')
+    print(nii_files)
+    nii_paths = set([x.parent for x in nii_files])
+    print(nii_paths)
+    for p in nii_paths:
+        image_id = extract_from_path(in_path,image_id_pattern)
+        image_id = int(image_id.replace('I',''))
+        image_id_list.append(image_id)
+
+
+    dcm_files = in_path.glob('**/*.dcm')
+    # From the files get the directories 
+    # and make a set of unique paths
+    dcm_paths = set([x.parent for x in dcm_files])
+    print(dcm_paths)
+    # Get the image_id from each of the paths
+    for p in dcm_paths:
+        image_id = extract_from_path(in_path,image_id_pattern)
+        if image_id not in image_id_list:
+            image_id = int(image_id.replace('I',''))
+            image_id_list.append(image_id)
         
         
+    if not image_id_list:
+        print("Could not identify any images from paths")
+        print(in_path)
+        sys.exit(1)
+
+    print(f'Subject {subject_id}')    
+
+    # Load in the data from the info sheet
+    df_mr_info = process_study_sheet(args.mr_study)
+    df_pet_info = process_study_sheet(args.pet_study)
+
+    df_mr_image = process_image_sheet(args.mr_image,modality='MR')
+    df_pet_image = process_image_sheet(args.pet_image,modality='PT')
+
+    # Now merge the two
+    df_mr_info = pd.merge(df_mr_info,df_mr_image,
+                    left_on=['subject_id','visit'],
+                    right_on=['subject_id','image_visit'],
+                    how='outer')
+    df_pet_info = pd.merge(df_pet_info,df_pet_image,
+                    left_on=['subject_id','visit'],
+                    right_on=['subject_id','image_visit'],
+                    how='outer')
+
+    # Find the rows that matches the subject and scan
+    df_subject = df_mr_info.loc[df_mr_info['subject_id']==subject_id]
+    df_subject_demog = df_subject.dropna(subset='PTDOBYY')
+    yob_constant = df_subject_demog['PTDOBYY'].all()
+    gender_constant = df_subject_demog['PTGENDER'].all()
+    ethnicity_constant = df_subject_demog['PTETHCAT'].all()
+    race_constant = df_subject_demog['PTRACCAT'].all()
+    education_constant = df_subject_demog['PTEDUCAT'].all()
+    if not yob_constant or not gender_constant or \
+        not ethnicity_constant or not race_constant or \
+        not education_constant:
+            print("Inconsistent subject level variables")
+            print(df_subject_demog.loc[:,
+                ["subject_id","visit","PTDOBYY",
+                "PTEDUCAT","PTGENDER","PTETHCAT",
+                "PTRACCAT"]
+            ])
+    # Unless I get a bunch of these, I'm going to assume
+    # first row is OK
+    first_row = df_subject_demog.iloc[0]
+    print(first_row)
+    in_yob = first_row['PTDOBYY']
+    in_gender = first_row['PTGENDER_STR']
+    in_ethnicity = first_row['PTETHCAT_STR']
+    in_race = first_row['PTRACCAT_STR']
+    in_education = first_row['PTEDUCAT']
+    in_apoe = first_row['GENOTYPE'].replace("/","_")
+
+    # Now here is where I want to assign all of the DICOMS
+    # And all of the Niftis to the appropriate session
+    # I envision a list of dictionaries
+    # Each list entry will have the xnat session to be named
+    # The ADNI session ID, the modality
+    # And a list of all of the DICOM and Nifti files associated
+    # with the session
+    # That way I can zip up the DICOM and then import
+    # The Nifti
+    # First populate the image_id info
+    upload_dict = {}
+    image_to_study_map={}
+    for image_id in image_id_list:
+        session_id = None
+        if image_id in df_mr_info.index:
+            df_session = df_mr_info.loc[image_id].squeeze()
+            visit_id = df_session['visit']
+            study_id = df_session['study_id']
+            image_date = df_session['image_date']
+            session_id = f"{subject_id}-{visit_id}-MR"
+
+        elif image_id in df_pet_info.index:
+            df_session = df_pet_info.loc[image_id].squeeze()
+            visit_id = df_session['visit']
+            study_id = df_session['study_id']
+            image_date = df_session['image_date']
+            radiopharm = df_session['pet_radiopharm'].replace('18F-','')
+            session_id = f"{subject_id}-{visit_id}-PET-{radiopharm}"
+            
+        if session_id is None:
+            print(f'WARNING: Could not find {image_id} in the spreadsheets')
+            print('Skipping this session for now')
+            continue
+        
+        image_to_study_map[image_id] = study_id
+        upload_dict[study_id] = {
+            visit_id: visit_id,
+            image_date: image_date,
+            session_id: session_id,
+            dcm_files: [],
+            nii_files: [],
+        }
+
+    for f in dcm_files:
+        # Parse file name:
+        file_info = re.match(file_pattern,f.name)
+        image_id = file_info.group(3)
+        study_id = image_to_study_map[image_id]
+        upload_dict[study_id].dcm_files.append(f)
+
+    for f in nii_files:
+        # Parse file name:
+        file_info = re.match(file_pattern,f.name)
+        image_id = file_info.group(3)
+        study_id = image_to_study_map[image_id]
+        upload_dict[study_id].nii_files.append(f)
+        
+    print(f'Subject: {subject_id}')
+    print(image_to_study_map)
+    print(upload_dict)
+    sys.exit(1)
+            
     
+    update_subject=args.update
+    with xnat.connect(xnat_host, extension_types=False) as xnat_session:
+        # Get list of subjects for the project. 
+        xnat_project = xnat_session.projects[notepad_project]
+        xnat_subjects = xnat_project.subjects
+        # If we don't have the subject in XNAT create it
+        if subject_id not in xnat_subjects:
+            # This needs key demographics
+            print(f"Creating subject {subject_id}")
+            xnat_subject = xnat_session.classes.SubjectData(
+                parent=xnat_project, 
+                label=subject_id)
+            update_subject=True
+        else:
+            xnat_subject = xnat_subjects[subject_id]
+        # If just created or args say to update it
+        # Grab the metadata
+        if update_subject:
+            xnat_subject.demographics.yob = in_yob
+            xnat_subject.demographics.gender = in_gender
+            xnat_subject.demographics.ethnicity = in_ethnicity
+            xnat_subject.demographics.education=in_education
+            xnat_subject.demographics.race = in_race
+            # This command will have to happen after upgrade or via REST call 
+            apoe_string = {
+                "xnat:subjectData/fields/field[name=apoe]/field": in_apoe
+            }   
+            xnat_session.put(
+                path=f"/data/projects/{notepad_project}/subjects/{subject_id}",
+                query=apoe_string
+                )
+
+        xnat_img_sessions = xnat_subjects[subject_id].experiments
+        # Go through the sessions
+        for study_id, upload_session in upload_dict.items():
+            # If the data is not in the system, upload the DICOM!
+            session_id = upload_session['session_id']
+            if session_id not in xnat_img_sessions:
+                print(f"New session {session_id}")
+                zip_path = Path(f'\tmp\{study_id}.zip')
+                with ZipFile(zip_path,'w') as import_zip:
+                    for dcm_up in upload_session['dcm_files']:
+                        import_zip.write(dcm_up)
+                archive_session = xnat_session.services.import_(
+                    zip_path, project=notepad_project, 
+                    subject=subject_id,
+                    experiment=session_id)
+
+                
+        # IMPORT SESSION
+        # Once the XNAT is updated, we can use DICOM Inbox
+        # xnat_session.services.import_dicom_inbox(
+        #    path=in_path,
+        #    project=notepad_project,
+        #    subject=subject_id,
+        #    experiment=in_session,
+        #)
+                        
+        
+        # TO DO: BIDS CONVERT
+        # This will need the file archived. 
+        # Will wait to see that DICOM is sorted before adding
+        
+        
+if __name__ == "__main__":
+    main()
+ 
