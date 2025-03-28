@@ -101,7 +101,7 @@ def process_image_sheet(img_study,modality):
         # Keeping only 3T data (some rando scans with field strength 2.89)
         # And all of the MPRAGE have slice thicknesses less than 1.3
         df_image = df_image.loc[df_image["mri_field_str"]>2.5]
-        df_image = df_image.loc[df_image["mri_thickness"]<1.3]
+        #df_image = df_image.loc[df_image["mri_thickness"]<1.3]
 
     else:
         df_image = df_image[pet_keep_cols]
@@ -113,8 +113,44 @@ def process_image_sheet(img_study,modality):
         df_image = df_image.loc[df_image["pet_radiopharm"]!="18F-FDG"]
         df_image = df_image.loc[df_image["pet_radiopharm"]!="11C-PIB"]
     df_image = df_image.sort_values(by=['subject_id','image_date'])
-    df_image.set_index('image_id')
     return df_image
+
+def make_dcm_zip(dcm_list,study_id):
+    zip_path = Path('/tmp',f'{study_id}.zip')
+    study_uids = []
+    series_uids = []
+    make_new_uid = False
+    for dcm_up in dcm_list:
+        ds = dcm.dcmread(dcm_up)
+        study_uids.append(ds.StudyInstanceUID)
+        series_uids.append(ds.SeriesInstanceUID)
+    study_uid_set = set(study_uids)
+    series_uid_set = set(series_uids)
+    if len(study_uid_set) > 1:
+        print('Multiple UIDs detected')
+        print(study_uid_set)
+        make_new_uid=True
+        temp_dcm_dir=Path('/tmp',f'{study_id}_temp')
+        temp_dcm_dir.mkdir(exist_ok=True,parents=True)
+        new_study_uid = dcm.uid.generate_uid()
+        for dcm_up in dcm_list:
+            ds = dcm.dcmread(dcm_up)
+            ds.StudyInstanceUID = new_study_uid
+            dcm_out = temp_dcm_dir / dcm_up.name
+            ds.save_as(dcm_out)
+      
+    with ZipFile(zip_path,'w') as import_zip:
+        if make_new_uid:
+            for dcm_up in temp_dcm_dir.glob('*.dcm'):
+                import_zip.write(dcm_up)
+        else:
+            for dcm_up in dcm_list:
+                import_zip.write(dcm_up)
+
+    if make_new_uid:
+        shutil.rmtree(temp_dcm_dir)
+    return(zip_path)
+                
 
 # Refactor: Look at a whole subject's data
 # Group the scans by study into one Zip file
@@ -173,11 +209,10 @@ def main():
     image_id_list = []
 
     nii_files = in_path.glob('**/*.nii.gz')
-    print(nii_files)
     nii_paths = set([x.parent for x in nii_files])
     print(nii_paths)
     for p in nii_paths:
-        image_id = extract_from_path(in_path,image_id_pattern)
+        image_id = extract_from_path(p,image_id_pattern)
         image_id = int(image_id.replace('I',''))
         image_id_list.append(image_id)
 
@@ -189,7 +224,7 @@ def main():
     print(dcm_paths)
     # Get the image_id from each of the paths
     for p in dcm_paths:
-        image_id = extract_from_path(in_path,image_id_pattern)
+        image_id = extract_from_path(p,image_id_pattern)
         if image_id not in image_id_list:
             image_id = int(image_id.replace('I',''))
             image_id_list.append(image_id)
@@ -206,18 +241,22 @@ def main():
     df_mr_info = process_study_sheet(args.mr_study)
     df_pet_info = process_study_sheet(args.pet_study)
 
+
     df_mr_image = process_image_sheet(args.mr_image,modality='MR')
     df_pet_image = process_image_sheet(args.pet_image,modality='PT')
-
+    
     # Now merge the two
     df_mr_info = pd.merge(df_mr_info,df_mr_image,
                     left_on=['subject_id','visit'],
                     right_on=['subject_id','image_visit'],
                     how='outer')
+    df_mr_info = df_mr_info.set_index('image_id')
+
     df_pet_info = pd.merge(df_pet_info,df_pet_image,
                     left_on=['subject_id','visit'],
                     right_on=['subject_id','image_visit'],
                     how='outer')
+    df_pet_info = df_pet_info.set_index('image_id')
 
     # Find the rows that matches the subject and scan
     df_subject = df_mr_info.loc[df_mr_info['subject_id']==subject_id]
@@ -281,34 +320,31 @@ def main():
             print('Skipping this session for now')
             continue
         
-        image_to_study_map[image_id] = study_id
-        upload_dict[study_id] = {
-            visit_id: visit_id,
-            image_date: image_date,
-            session_id: session_id,
-            dcm_files: [],
-            nii_files: [],
+        image_to_study_map[image_id] = int(study_id)
+        upload_dict[int(study_id)] = {
+            'visit_id': visit_id,
+            'image_date': image_date,
+            'session_id': session_id,
+            'dcm_files': [],
+            'nii_files': [],
         }
-
+    dcm_files = in_path.glob('**/*.dcm')
     for f in dcm_files:
         # Parse file name:
         file_info = re.match(file_pattern,f.name)
-        image_id = file_info.group(3)
+        image_id = int(file_info.group(3))
         study_id = image_to_study_map[image_id]
-        upload_dict[study_id].dcm_files.append(f)
+        upload_dict[study_id]['dcm_files'].append(f)
 
+    nii_files = in_path.glob('**/*.nii.gz')
     for f in nii_files:
         # Parse file name:
         file_info = re.match(file_pattern,f.name)
-        image_id = file_info.group(3)
+        image_id = int(file_info.group(3))
         study_id = image_to_study_map[image_id]
-        upload_dict[study_id].nii_files.append(f)
+        upload_dict[study_id]['nii_files'].append(f)
         
     print(f'Subject: {subject_id}')
-    print(image_to_study_map)
-    print(upload_dict)
-    sys.exit(1)
-            
     
     update_subject=args.update
     with xnat.connect(xnat_host, extension_types=False) as xnat_session:
@@ -349,15 +385,19 @@ def main():
             session_id = upload_session['session_id']
             if session_id not in xnat_img_sessions:
                 print(f"New session {session_id}")
-                zip_path = Path(f'\tmp\{study_id}.zip')
-                with ZipFile(zip_path,'w') as import_zip:
-                    for dcm_up in upload_session['dcm_files']:
-                        import_zip.write(dcm_up)
-                archive_session = xnat_session.services.import_(
-                    zip_path, project=notepad_project, 
-                    subject=subject_id,
-                    experiment=session_id)
-
+                n_dcm = len(upload_session['dcm_files'])
+                n_nii = len(upload_session['nii_files'])
+                print(f"Visit Type: {visit_id}")
+                print(f"DICOM Files: {n_dcm}")
+                print(f"NII Files: {n_nii}")
+                if n_dcm > 0:
+                    zip_path = make_dcm_zip(upload_session['dcm_files'],study_id)
+                    archive_session = xnat_session.services.import_(
+                        zip_path, project=notepad_project, 
+                        subject=subject_id,
+                        experiment=session_id)
+            else:
+                print(f"{session_id} already in XNAT")
                 
         # IMPORT SESSION
         # Once the XNAT is updated, we can use DICOM Inbox
