@@ -325,24 +325,35 @@ def main():
             'visit_id': visit_id,
             'image_date': image_date,
             'session_id': session_id,
-            'dcm_files': [],
-            'nii_files': [],
+            'series_info' : {},
         }
     dcm_files = in_path.glob('**/*.dcm')
     for f in dcm_files:
         # Parse file name:
         file_info = re.match(file_pattern,f.name)
         image_id = int(file_info.group(3))
+        series_id = int(file_info.group(2))
         study_id = image_to_study_map[image_id]
-        upload_dict[study_id]['dcm_files'].append(f)
-
+        if series_id not in upload_dict[study_id]['series_info']:
+            upload_dict[study_id]['series_info'][series_id] = {
+                'dcm_files': [],
+                'nii_files': [],
+            }
+        upload_dict[study_id]['series_info'][series_id]['dcm_files'].append(f)
+        
     nii_files = in_path.glob('**/*.nii.gz')
     for f in nii_files:
         # Parse file name:
         file_info = re.match(file_pattern,f.name)
         image_id = int(file_info.group(3))
+        series_id = int(file_info.group(2))
         study_id = image_to_study_map[image_id]
-        upload_dict[study_id]['nii_files'].append(f)
+        if series_id not in upload_dict[study_id]['series_info']:
+            upload_dict[study_id]['series_info'][series_id] = {
+                'dcm_files': [],
+                'nii_files': [],
+            }
+        upload_dict[study_id]['series_info'][series_id]['nii_files'].append(f)
         
     print(f'Subject: {subject_id}')
     
@@ -383,19 +394,21 @@ def main():
         for study_id, upload_session in upload_dict.items():
             # If the data is not in the system, upload the DICOM!
             session_id = upload_session['session_id']
+            scan_dict = upload_session['series_info']
             if session_id not in xnat_img_sessions:
                 print(f"New session {session_id}")
-                n_dcm = len(upload_session['dcm_files'])
-                n_nii = len(upload_session['nii_files'])
-                print(f"Visit Type: {visit_id}")
-                print(f"DICOM Files: {n_dcm}")
-                print(f"NII Files: {n_nii}")
-                if n_dcm > 0:
-                    zip_path = make_dcm_zip(upload_session['dcm_files'],study_id)
-                    archive_session = xnat_session.services.import_(
-                        zip_path, project=notepad_project, 
-                        subject=subject_id,
-                        experiment=session_id)
+                for scan in scan_dict:
+                    n_dcm = len(scan['dcm_files'])
+                    n_nii = len(scan['nii_files'])
+                    print(f"Visit Type: {visit_id}")
+                    print(f"DICOM Files: {n_dcm}")
+                    print(f"NII Files: {n_nii}")
+                    if n_dcm > 0:
+                        zip_path = make_dcm_zip(upload_session['dcm_files'],study_id)
+                        archive_session = xnat_session.services.import_(
+                            zip_path, project=notepad_project, 
+                            subject=subject_id,
+                            experiment=session_id)
             else:
                 print(f"{session_id} already in XNAT")
                 
