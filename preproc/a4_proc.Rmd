@@ -46,10 +46,14 @@ df_tau_group <- group_by(df_tau,BID) %>%
   mutate(ntp = n()) 
 df_tau_bl <- filter(df_tau_group,row_number()==1) %>% ungroup()
 count(df_tau_bl,ntp)
+tau_substudy<-tableby(SUBSTUDY ~ as.factor(ntp), data=df_tau_bl) 
+summary(tau_substudy)
 
 df_amy_group <- group_by(df_amy,BID) %>% 
   mutate(ntp = n()) 
 df_amy_bl <- filter(df_amy_group,row_number()==1) %>% ungroup()
 count(df_amy_bl,ntp)
+amy_substudy<-tableby(SUBSTUDY ~ as.factor(ntp), data=df_amy_bl) 
+summary(amy_substudy)
 
 ```
