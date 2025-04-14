@@ -1,5 +1,6 @@
 import sys
 import re
+import time
 from pathlib import Path
 from zipfile import ZipFile
 import shutil
@@ -18,6 +19,7 @@ notepad_project = "NOTEPAD_ADNI"
 subject_id_pattern = re.compile(r"^\d{3}_S_\d{4}$")
 image_id_pattern = re.compile(r"^I\d+$")
 file_pattern = re.compile(r"^ADNI_(\d{3}_S_\d{4})_.*_S(\d+)_I(\d+).[dn].*")
+datetime_pattern = re.compile(r"^20\d{2}-[01]\d-[0123]\d_[012]\d_[0-5]\d_[0-5]\d")
 
 # Which columns from ADNI MRI and PET spreadsheets should be kept
 mr_keep_cols = [
@@ -55,8 +57,6 @@ race_map = {
     7: "Unknown"
 }
 
-# Make a main here
-
 # This just extracts the bit of path that matches the pattern
 # and returns it
 def extract_from_path(input_path,input_pattern):
@@ -64,9 +64,111 @@ def extract_from_path(input_path,input_pattern):
     # Parse the path to get the subject ID and image ID
     path_parts = input_path.parts
     for p in path_parts:
-        if re.match(input_pattern,p):
-            out_key = p
+        hit = re.match(input_pattern,p)
+        if hit:
+            out_key = hit.group()
             return out_key
+
+def get_image_ids(in_path,path_glob,id_list):
+    file_path_list = in_path.glob(path_glob)
+    dir_path_list = set([x.parent for x in file_path_list])
+    for p in dir_path_list:
+        image_id = extract_from_path(p,image_id_pattern)
+        image_id = int(image_id.replace('I',''))
+        if image_id not in id_list:
+            id_list.append(image_id)
+
+def parse_image_filename(file_path):
+    file_info = re.match(file_pattern,file_path.name)
+    if file_info is None:
+        image_id = extract_from_path(file_path.parent,image_id_pattern)
+        image_id = int(image_id.replace('I',''))
+        scandate = extract_from_path(file_path.parent,datetime_pattern)
+        series_id = scandate.replace('_','')
+        series_id = int(series_id.replace('-',''))
+    else:
+        image_id = int(file_info.group(3))
+        series_id = int(file_info.group(2))
+    return (image_id, series_id)
+
+def process_image_list(subject_id,image_list,adni_studies,
+                       df_mr,df_pet,
+                       dcm_flag=True):
+    current_image_id = None
+    df_session = None
+    adni_info={}
+    for f in image_list:
+        image_id, series_id = parse_image_filename(f)
+        # To avoid reading in the spreadsheet for every file
+        # Just change it when a new image pops up
+        if image_id != current_image_id:
+            # Grab releant info from image spreadsheets
+            modality=""
+            xnat_session_label = None
+            if image_id in df_mr.index:
+                df_session = df_mr.loc[image_id].squeeze()
+                modality = "MR"
+            elif image_id in df_pet.index:
+                df_session = df_pet.loc[image_id].squeeze()
+                radiopharm = df_session['pet_radiopharm'].replace('18F-','')
+                modality = f"PET-{radiopharm}"
+            else:
+                print(f'WARNING: Could not find {image_id} in the spreadsheets')
+                print('Skipping this session for now')
+                continue
+            # Make a dict to store the relevant information
+            # So it is to hand for the next image
+            # if it is from the same image ID
+            adni_info['image_id'] = image_id
+            adni_info['series_id'] = series_id
+            adni_info['visit_id'] = df_session['visit']
+            adni_info['study_id'] = int(df_session['study_id'])
+            adni_info['image_date'] = df_session['image_date']
+            image_description = df_session['image_description']
+            image_description = image_description.replace(';','_')
+            image_description = image_description.replace(' ','_')
+            adni_info['image_description'] = image_description
+            adni_info['session_label'] = f"{subject_id}-{adni_info['visit_id']}-{modality}"
+            current_image_id = image_id
+        # If we don't have information for this study ID
+        # Add it
+        if adni_info['study_id'] not in adni_studies:
+            study_info = {
+                'modality': modality,
+                'visit_id': adni_info['visit_id'],
+                'image_date': adni_info['image_date'],
+                'session_id': adni_info['session_label'],
+                'series_list' : {},
+            }
+            adni_studies[adni_info['study_id']] = study_info
+        series_map = adni_studies[adni_info['study_id']]['series_list']
+        if adni_info['series_id'] not in series_map:
+            xnat_scan_number = str(adni_info['series_id'])
+            if dcm_flag:
+                with dcm.dcmread(f) as ds:
+                    if ds.SeriesNumber is not None:
+                        xnat_scan_number = str(ds.SeriesNumber)
+            series_info = {
+                'scan_number': xnat_scan_number,
+                'image_list':{},
+                }
+            print(series_id)
+            print(series_info['scan_number'])
+            series_map[adni_info['series_id']] = series_info
+        image_map = series_map[adni_info['series_id']]['image_list']
+        if adni_info['image_id'] not in image_map:
+            image_info = {
+                'image_description': adni_info['image_description'],
+                'dcm_files': [],
+                'nii_files': [],
+            }
+            image_map[adni_info['image_id']] = image_info
+        if dcm_flag:        
+            image_map[adni_info['image_id']]['dcm_files'].append(f)
+        else:
+            image_map[adni_info['image_id']]['nii_files'].append(f)
+            
+
 
 # This processes the study sheet of subject metadata
 def process_study_sheet(img_info):
@@ -96,7 +198,8 @@ def process_image_sheet(img_study,modality):
         df_image = df_image[mr_keep_cols]
         df_image = df_image.rename(
             columns={'mri_visit': 'image_visit',
-                    'mri_date': 'image_date'}
+                    'mri_date': 'image_date',
+                    'mri_description': 'image_description'}
             )        
         # Keeping only 3T data (some rando scans with field strength 2.89)
         # And all of the MPRAGE have slice thicknesses less than 1.3
@@ -107,7 +210,8 @@ def process_image_sheet(img_study,modality):
         df_image = df_image[pet_keep_cols]
         df_image = df_image.rename(
             columns={'pet_visit': 'image_visit',
-                    'pet_date': 'image_date'}
+                    'pet_date': 'image_date',
+                    'pet_description': 'image_description'}
             )
         # Remove FDG and PIB (for time being)
         df_image = df_image.loc[df_image["pet_radiopharm"]!="18F-FDG"]
@@ -115,13 +219,25 @@ def process_image_sheet(img_study,modality):
     df_image = df_image.sort_values(by=['subject_id','image_date'])
     return df_image
 
+def get_scan_number(dcm_file_list):
+    scan_number_list = []
+    for f in dcm_file_list:
+        with dcm.dcmread(f) as ds:
+            if (ds.SeriesNumber is not None) and (ds.SeriesNumber not in scan_number_list):
+                scan_number_list.append(ds.SeriesNumber)
+    return scan_number_list
+
+
 def make_dcm_zip(dcm_list,study_id):
     zip_path = Path('/tmp',f'{study_id}.zip')
     study_uids = []
     series_uids = []
     make_new_uid = False
+    create_series_number=False
     for dcm_up in dcm_list:
         ds = dcm.dcmread(dcm_up)
+        if ds.SeriesNumber is None:
+            create_series_number=True
         study_uids.append(ds.StudyInstanceUID)
         series_uids.append(ds.SeriesInstanceUID)
     study_uid_set = set(study_uids)
@@ -130,24 +246,29 @@ def make_dcm_zip(dcm_list,study_id):
         print('Multiple UIDs detected')
         print(study_uid_set)
         make_new_uid=True
-        temp_dcm_dir=Path('/tmp',f'{study_id}_temp')
+    if make_new_uid or create_series_number:
+        temp_dcm_dir=Path('/tmp',f'{study_id}-temp')
         temp_dcm_dir.mkdir(exist_ok=True,parents=True)
         new_study_uid = dcm.uid.generate_uid()
         for dcm_up in dcm_list:
+            adni_image_id, adni_series_id = parse_image_filename(dcm_up)
             ds = dcm.dcmread(dcm_up)
-            ds.StudyInstanceUID = new_study_uid
+            if make_new_uid:
+                ds.StudyInstanceUID = new_study_uid
+            if create_series_number:
+                ds.SeriesNumber=adni_series_id
             dcm_out = temp_dcm_dir / dcm_up.name
             ds.save_as(dcm_out)
       
     with ZipFile(zip_path,'w') as import_zip:
-        if make_new_uid:
+        if make_new_uid or create_series_number:
             for dcm_up in temp_dcm_dir.glob('*.dcm'):
                 import_zip.write(dcm_up)
         else:
             for dcm_up in dcm_list:
                 import_zip.write(dcm_up)
 
-    if make_new_uid:
+    if make_new_uid or create_series_number:
         shutil.rmtree(temp_dcm_dir)
     return(zip_path)
                 
@@ -196,46 +317,15 @@ def main():
 
     # Parse path to get subject ID and image ID 
     in_path = Path(args.in_path)
-    subject_id = extract_from_path(in_path,subject_id_pattern)
+    adni_subject_id = extract_from_path(in_path,subject_id_pattern)
 
-    if subject_id is None:
+    if adni_subject_id is None:
         print("Could not identify subject from path")
         print(in_path)
         sys.exit(1)
 
-    # Now we need to identify:
-    # What images are DICOM and what are Nifti
-    # Which ones are PET and which ones are MRI
-    image_id_list = []
 
-    nii_files = in_path.glob('**/*.nii.gz')
-    nii_paths = set([x.parent for x in nii_files])
-    print(nii_paths)
-    for p in nii_paths:
-        image_id = extract_from_path(p,image_id_pattern)
-        image_id = int(image_id.replace('I',''))
-        image_id_list.append(image_id)
-
-
-    dcm_files = in_path.glob('**/*.dcm')
-    # From the files get the directories 
-    # and make a set of unique paths
-    dcm_paths = set([x.parent for x in dcm_files])
-    print(dcm_paths)
-    # Get the image_id from each of the paths
-    for p in dcm_paths:
-        image_id = extract_from_path(p,image_id_pattern)
-        if image_id not in image_id_list:
-            image_id = int(image_id.replace('I',''))
-            image_id_list.append(image_id)
-        
-        
-    if not image_id_list:
-        print("Could not identify any images from paths")
-        print(in_path)
-        sys.exit(1)
-
-    print(f'Subject {subject_id}')    
+    print(f'Subject {adni_subject_id}')    
 
     # Load in the data from the info sheet
     df_mr_info = process_study_sheet(args.mr_study)
@@ -259,7 +349,7 @@ def main():
     df_pet_info = df_pet_info.set_index('image_id')
 
     # Find the rows that matches the subject and scan
-    df_subject = df_mr_info.loc[df_mr_info['subject_id']==subject_id]
+    df_subject = df_mr_info.loc[df_mr_info['subject_id']==adni_subject_id]
     df_subject_demog = df_subject.dropna(subset='PTDOBYY')
     yob_constant = df_subject_demog['PTDOBYY'].all()
     gender_constant = df_subject_demog['PTGENDER'].all()
@@ -275,8 +365,10 @@ def main():
                 "PTEDUCAT","PTGENDER","PTETHCAT",
                 "PTRACCAT"]
             ])
+
     # Unless I get a bunch of these, I'm going to assume
     # first row is OK
+    # This information will be included when creating the subject
     first_row = df_subject_demog.iloc[0]
     print(first_row)
     in_yob = first_row['PTDOBYY']
@@ -286,92 +378,21 @@ def main():
     in_education = first_row['PTEDUCAT']
     in_apoe = first_row['GENOTYPE'].replace("/","_")
 
-    # Now here is where I want to assign all of the DICOMS
-    # And all of the Niftis to the appropriate session
-    # I envision a list of dictionaries
-    # Each list entry will have the xnat session to be named
-    # The ADNI session ID, the modality
-    # And a list of all of the DICOM and Nifti files associated
-    # with the session
-    # That way I can zip up the DICOM and then import
-    # The Nifti
-    # First populate the image_id info
-    upload_dict = {}
-    image_to_study_map={}
-    for image_id in image_id_list:
-        session_id = None
-        if image_id in df_mr_info.index:
-            df_session = df_mr_info.loc[image_id].squeeze()
-            visit_id = df_session['visit']
-            study_id = df_session['study_id']
-            image_date = df_session['image_date']
-            session_id = f"{subject_id}-{visit_id}-MR"
-
-        elif image_id in df_pet_info.index:
-            df_session = df_pet_info.loc[image_id].squeeze()
-            visit_id = df_session['visit']
-            study_id = df_session['study_id']
-            image_date = df_session['image_date']
-            radiopharm = df_session['pet_radiopharm'].replace('18F-','')
-            session_id = f"{subject_id}-{visit_id}-PET-{radiopharm}"
-            
-        if session_id is None:
-            print(f'WARNING: Could not find {image_id} in the spreadsheets')
-            print('Skipping this session for now')
-            continue
-        
-        image_to_study_map[image_id] = int(study_id)
-        upload_dict[int(study_id)] = {
-            'visit_id': visit_id,
-            'image_date': image_date,
-            'session_id': session_id,
-            'series_info' : {},
-        }
-    dcm_files = in_path.glob('**/*.dcm')
-    for f in dcm_files:
-        # Parse file name:
-        file_info = re.match(file_pattern,f.name)
-        image_id = int(file_info.group(3))
-        series_id = int(file_info.group(2))
-        study_id = image_to_study_map[image_id]
-        if series_id not in upload_dict[study_id]['series_info']:
-            upload_dict[study_id]['series_info'][series_id] = {
-                'dcm_files': [],
-                'nii_files': [],
-            }
-        upload_dict[study_id]['series_info'][series_id]['dcm_files'].append(f)
-        
-    nii_files = in_path.glob('**/*.nii.gz')
-    for f in nii_files:
-        # Parse file name:
-        file_info = re.match(file_pattern,f.name)
-        image_id = int(file_info.group(3))
-        series_id = int(file_info.group(2))
-        study_id = image_to_study_map[image_id]
-        if series_id not in upload_dict[study_id]['series_info']:
-            upload_dict[study_id]['series_info'][series_id] = {
-                'dcm_files': [],
-                'nii_files': [],
-            }
-        upload_dict[study_id]['series_info'][series_id]['nii_files'].append(f)
-        
-    print(f'Subject: {subject_id}')
-    
     update_subject=args.update
-    with xnat.connect(xnat_host, extension_types=False) as xnat_session:
+    with xnat.connect(xnat_host) as xnat_session:
         # Get list of subjects for the project. 
         xnat_project = xnat_session.projects[notepad_project]
         xnat_subjects = xnat_project.subjects
         # If we don't have the subject in XNAT create it
-        if subject_id not in xnat_subjects:
+        if adni_subject_id not in xnat_subjects:
             # This needs key demographics
-            print(f"Creating subject {subject_id}")
+            print(f"Creating subject {adni_subject_id}")
             xnat_subject = xnat_session.classes.SubjectData(
                 parent=xnat_project, 
-                label=subject_id)
+                label=adni_subject_id)
             update_subject=True
         else:
-            xnat_subject = xnat_subjects[subject_id]
+            xnat_subject = xnat_subjects[adni_subject_id]
         # If just created or args say to update it
         # Grab the metadata
         if update_subject:
@@ -385,47 +406,131 @@ def main():
                 "xnat:subjectData/fields/field[name=apoe]/field": in_apoe
             }   
             xnat_session.put(
-                path=f"/data/projects/{notepad_project}/subjects/{subject_id}",
+                path=f"/data/projects/{notepad_project}/subjects/{adni_subject_id}",
                 query=apoe_string
                 )
 
-        xnat_img_sessions = xnat_subjects[subject_id].experiments
-        # Go through the sessions
-        for study_id, upload_session in upload_dict.items():
-            # If the data is not in the system, upload the DICOM!
-            session_id = upload_session['session_id']
-            scan_dict = upload_session['series_info']
-            if session_id not in xnat_img_sessions:
-                print(f"New session {session_id}")
-                for scan in scan_dict:
-                    n_dcm = len(scan['dcm_files'])
-                    n_nii = len(scan['nii_files'])
-                    print(f"Visit Type: {visit_id}")
-                    print(f"DICOM Files: {n_dcm}")
-                    print(f"NII Files: {n_nii}")
-                    if n_dcm > 0:
-                        zip_path = make_dcm_zip(upload_session['dcm_files'],study_id)
-                        archive_session = xnat_session.services.import_(
-                            zip_path, project=notepad_project, 
-                            subject=subject_id,
-                            experiment=session_id)
+    # Now we need to identify:
+    # What images are DICOM and what are Nifti
+    # Which ones are PET and which ones are MRI
+    adni_image_id_list = []
+    get_image_ids(in_path=in_path, path_glob='**/*.nii.gz', id_list=adni_image_id_list)
+    get_image_ids(in_path=in_path, path_glob='**/*.dcm', id_list=adni_image_id_list)
+        
+    if not adni_image_id_list:
+        print("Could not identify any images from paths")
+        print(in_path)
+        sys.exit(1)
+
+    # So this should be a tree
+    # STUDY (i.e. MR or PET session in XNAT)
+    # Series (i.e. SCAN entry in XNAT)
+    # Image (i.e. RESOURCE in a SCAN - DICOM or processed)
+    # Upload_dict is a dict of ADNI study IDs[]
+    # Study ID can have one to many series IDS
+    # Series can have 
+
+    # Go through all of the paths and find out what needs to be added
+    upload_studies = {}
+
+    dcm_files = in_path.glob('**/*.dcm')
+    process_image_list(adni_subject_id,dcm_files,upload_studies,
+                       df_mr_info,df_pet_info,dcm_flag=True)
+
+    nii_files = in_path.glob('**/*.nii.gz')
+    process_image_list(adni_subject_id,nii_files,upload_studies,
+                       df_mr_info,df_pet_info,dcm_flag=False)
+ 
+    with xnat.connect(xnat_host) as xnat_session:
+        # Get list of subjects for the project. 
+        xnat_project = xnat_session.projects[notepad_project]
+        xnat_subject = xnat_project.subjects[adni_subject_id]
+
+        xnat_img_sessions = xnat_subject.experiments
+        # Go through all of the entries in the dictionary
+        for study_id, study_info in upload_studies.items():
+            xnat_session_label = study_info['session_id']
+            print(xnat_session_label)
+            print(study_info['image_date'])
+            
+            # If a session is not present it needs to be created
+            # in part by archive_session
+            xnat_image_session=None
+            if xnat_session_label not in xnat_img_sessions:
+                print(f"New session {xnat_session_label}")
+                # Go through all of the series
+                # Collecting the DICOM to upload
+                series_map = study_info['series_list']
+                n_total_dcm = 0
+                study_dcm_list = []
+                for series_id,series_info in series_map.items():
+                    print(f"Series ID: {series_id}")
+                    image_map = series_info['image_list']
+                    for image_id, image_info in image_map.items():
+                        n_dcm = len(image_info['dcm_files'])
+                        print(f"DICOM Files: {n_dcm}")
+                        # Concatenate all study files to one list
+                        if n_dcm > 0:
+                            n_total_dcm = n_total_dcm + n_dcm
+                            study_dcm_list = study_dcm_list + image_info['dcm_files']
+                if n_total_dcm > 0:
+                    print(f"Total DICOM files: {n_total_dcm}")
+                    zip_path = make_dcm_zip(study_dcm_list,
+                                            study_id)
+                    archive_session = xnat_session.services.import_(
+                                zip_path, project=notepad_project, 
+                                subject=adni_subject_id,
+                                experiment=xnat_session_label)
+                    for f in study_dcm_list:
+                        f.unlink()
             else:
-                print(f"{session_id} already in XNAT")
-                
-        # IMPORT SESSION
-        # Once the XNAT is updated, we can use DICOM Inbox
-        # xnat_session.services.import_dicom_inbox(
-        #    path=in_path,
-        #    project=notepad_project,
-        #    subject=subject_id,
-        #    experiment=in_session,
-        #)
-                        
-        
-        # TO DO: BIDS CONVERT
-        # This will need the file archived. 
-        # Will wait to see that DICOM is sorted before adding
-        
+                print(f"Session {xnat_session_label} already archived")
+        # Now add NIFTIs to existing sessions
+        print("DICOM uploaded. Brief pause to let session archive")
+        time.sleep(20)
+        xnat_subject.clearcache()
+        xnat_img_sessions = xnat_subject.experiments
+        for study_id, study_info in upload_studies.items():
+            xnat_session_label = study_info['session_id']
+            print(xnat_session_label)
+            print(study_info['image_date'])
+            
+            # If a session is not present it needs to be created
+            # in part by archive_session
+            xnat_image_session=None
+            if xnat_session_label in xnat_img_sessions:
+                xnat_image_session = xnat_img_sessions[xnat_session_label]
+                series_map = study_info['series_list']
+                for series_id,series_info in series_map.items():
+                    print(f"Series ID: {series_id}")
+                    scan_label = str(series_info['scan_number'])
+                    print(scan_label)
+                    if scan_label in xnat_image_session.scans:
+                        print("Branding Series ID in scan")
+                        xnat_scan = xnat_image_session.scans[scan_label]
+                        xnat_scan.note = f"ADNI Series {series_id}"
+                    image_map = series_info['image_list']
+                    for image_id, image_info in image_map.items():
+                        n_nii = len(image_info['nii_files'])
+                        print(f"NII Files: {n_nii}")
+                        # For NIFTIs only upload when there is an established scan there
+                        if n_nii > 0:
+                            # We are only uploading data where DICOM is available
+                            # So the session exists and the scan does too
+                            for nii in image_info['nii_files']:
+                                if scan_label in xnat_image_session.scans:
+                                    xnat_scan = xnat_image_session.scans[scan_label]
+                                    image_description = image_info['image_description']
+                                    if image_description in xnat_scan.resources:
+                                        xnat_resource = xnat_scan.resources[image_description]
+                                    else:
+                                        xnat_resource = xnat_session.classes.ResourceCatalog(
+                                            parent=xnat_scan, 
+                                            label=image_description)
+                                    print(f"Uploading Nifti to {xnat_resource}")
+                                    xnat_resource.upload(str(nii), nii.name)
+                                    nii.unlink()
+                                    
         
 if __name__ == "__main__":
     main()
