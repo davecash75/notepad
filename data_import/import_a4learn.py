@@ -98,6 +98,15 @@ def create_session(session,subject,modality,experiment_label,nii_file,json_file,
             xnat_experiment.field_strength = bids_extract(bids_data,
                                                           'MagneticFieldStrength',
                                                           'Not specified')
+            var_string = {
+                "xnat:mrSessionData/fields/field[name=visitlabel]/field": visit_label,
+                "xnat:mrSessionData/fields/field[name=daysfromrandomisation]/field": str(days_to_random),
+                }   
+            session.put(
+                path=f"/data/projects/{notepad_project}/subjects/{subject_label}/experiments/{experiment_label}",
+                query=var_string
+            )
+       
 
         else:
             series_description = bids_extract(bids_data,
@@ -113,6 +122,14 @@ def create_session(session,subject,modality,experiment_label,nii_file,json_file,
                 'InjectedRadioactivity',
                 '0.0'
             )
+            var_string = {
+                "xnat:petSessionData/fields/field[name=visitlabel]/field": visit_label,
+                "xnat:petSessionData/fields/field[name=daysfromrandomization]/field": days_to_random,
+                }   
+            session.put(
+                path=f"/data/projects/{notepad_project}/subjects/{subject_label}/experiments/{experiment_label}",
+                query=var_string
+            )
         # See if you can add some more important stuff here
         # For the sessions
         xnat_experiment.manufacturer = bids_extract(bids_data,
@@ -127,9 +144,9 @@ def create_session(session,subject,modality,experiment_label,nii_file,json_file,
         CDRGLOBAL
         CDRSB
         MMSE
-        Diagnosis
         DaysSinceRandomisation
         ''' 
+        
         if series_number in xnat_experiment.scans:
             xnat_scan = xnat_experiment.scans[series_number]
         else:
