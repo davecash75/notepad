@@ -76,7 +76,11 @@ def create_subject(session, project, subject_label,df_subject):
         return(subject)
 
 
-def create_session(session,subject,modality,experiment_label,nii_file,json_file,visit_label,days_to_random):
+def create_experiment(session,subject,modality,
+                      experiment_label,
+                      nii_file,json_file,
+                      visit_label,days_to_random,
+                      cdr_sob = '-1',cdr_global = 'NA',mmse = '-1'):
     resource="BIDS"
     subject_label=subject.label
     if experiment_label in subject.experiments:
@@ -101,6 +105,9 @@ def create_session(session,subject,modality,experiment_label,nii_file,json_file,
             var_string = {
                 "xnat:mrSessionData/fields/field[name=visitlabel]/field": visit_label,
                 "xnat:mrSessionData/fields/field[name=daysfromrandomisation]/field": str(days_to_random),
+                "xnat:mrSessionData/fields/field[name=mmse]/field": mmse,
+                "xnat:mrSessionData/fields/field[name=cdrsob]/field": cdr_sob,
+                "xnat:mrSessionData/fields/field[name=cdrglobal]/field": cdr_global,
                 }   
             session.put(
                 path=f"/data/projects/{notepad_project}/subjects/{subject_label}/experiments/{experiment_label}",
@@ -125,6 +132,9 @@ def create_session(session,subject,modality,experiment_label,nii_file,json_file,
             var_string = {
                 "xnat:petSessionData/fields/field[name=visitlabel]/field": visit_label,
                 "xnat:petSessionData/fields/field[name=daysfromrandomization]/field": days_to_random,
+                "xnat:petSessionData/fields/field[name=mmse]/field": mmse,
+                "xnat:petSessionData/fields/field[name=cdrsob]/field": cdr_sob,
+                "xnat:petSessionData/fields/field[name=cdrglobal]/field": cdr_global,
                 }   
             session.put(
                 path=f"/data/projects/{notepad_project}/subjects/{subject_label}/experiments/{experiment_label}",
@@ -138,15 +148,7 @@ def create_session(session,subject,modality,experiment_label,nii_file,json_file,
         slice_thickness = bids_extract(bids_data,
                                        'SliceThickness',
                                        '0.0')
-        '''
-        TODO: Put custom variables in here:
-        VisitLabel
-        CDRGLOBAL
-        CDRSB
-        MMSE
-        DaysSinceRandomisation
-        ''' 
-        
+                
         if series_number in xnat_experiment.scans:
             xnat_scan = xnat_experiment.scans[series_number]
         else:
@@ -181,10 +183,12 @@ def create_session(session,subject,modality,experiment_label,nii_file,json_file,
                 parent=xnat_scan, label=resource)
         if nii_file.exists():
             xnat_resource.upload(str(nii_file), nii_file.name)
+            #TODO: Move to uploaded directory
         else:
             print(f"[WARNING] Could not find file: {nii_file}")
         if json_file.exists():
             xnat_resource.upload(str(json_file), json_file.name)
+            #TODO: Move to uploaded directory
         else:
             print(f"[WARNING] Could not find file: {json_file}")
         var_string = {
@@ -280,10 +284,19 @@ def main():
     subject_visit_sheet = in_dir / 'SV.csv'
     df_visits = pd.read_csv(subject_visit_sheet,
                             dtype = {'VISITCD': 'str'})
-    print(df_visits.columns)
-    print(df_visits.dtypes)
     df_visits = df_visits.set_index(['BID','VISITCD'])
 
+    cdr_sheet = in_dir / 'cdr.csv'
+    df_cdr = pd.read_csv(cdr_sheet,
+                         dtype = {'VISCODE': 'str'})
+    df_cdr = df_cdr.set_index(['BID','VISCODE'])
+    df_cdr = df_cdr.loc[:,['CDSOB','CDRSB','CDGLOBAL']]
+
+    mmse_sheet = in_dir / 'mmse.csv'
+    df_mmse = pd.read_csv(mmse_sheet,
+                          dtype={'VISCODE': 'str'})
+    df_mmse = df_mmse.set_index(['BID','VISCODE'])
+    df_mmse = df_mmse.loc[:,['MMSCORE']]
 
     a4_scans = in_dir.glob('*.json')
     with xnat.connect(xnat_host) as xnat_session:
@@ -319,11 +332,27 @@ def main():
             print(f"Visit ID: {visit_id}")
             print(f"Modality: {modality}")
             print(f"Sequence/Tracer: {submodality}")
-            visit_info = df_visits.loc[(subject_id,visit_id)]
-            print(visit_info)
-            visit_label = visit_info['VISIT']
-            days_to_random = visit_info['SVSTDTC_DAYS_T0']
-            
+            if (subject_id,visit_id) in df_visits.index:
+                visit_info = df_visits.loc[(subject_id,visit_id)]
+                print(visit_info)
+                visit_label = visit_info['VISIT']
+                days_to_random = visit_info['SVSTDTC_DAYS_T0']
+            else:
+                print('Error visit info not found for:')
+                print(subject_id)
+                print(visit_id)
+                continue 
+
+            cdr_sob = '-1'
+            cdr_global = 'NA'
+            mmse = '-1'
+            if (subject_id,visit_id) in df_cdr.index:
+                cdr_info = df_cdr.loc[(subject_id,visit_id)]
+                cdr_sob = cdr_info['CDSOB']
+                cdr_global = cdr_info['CDGLOBAL']
+            if (subject_id,visit_id) in df_mmse.index:
+                mmse_info = df_mmse.loc[(subject_id,visit_id)]
+                mmse = mmse_info['MMSCORE']
             
             if modality=="PET":
                 radiopharm = submodality.replace("FBP","AV45")
@@ -337,14 +366,17 @@ def main():
                                           subject_id,
                                           df_subject)
             if xnat_subject is not None:
-               image_session = create_session(xnat_session,
-                                              xnat_subject,
-                                              modality,
-                                              experiment_id,
-                                              nii_path,
-                                              json_path,
-                                              visit_label,
-                                              days_to_random)
+                experiment = create_experiment(xnat_session,
+                                               xnat_subject,
+                                               modality,
+                                               experiment_id,
+                                               nii_path,
+                                               json_path,
+                                               visit_label,
+                                               days_to_random,
+                                               cdr_sob,
+                                               cdr_global,
+                                               mmse)
             if i >= max_i and max_i > 0:
                 print("Hit stopping condition")
                 sys.exit(1)
