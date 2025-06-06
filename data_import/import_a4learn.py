@@ -148,10 +148,13 @@ def create_experiment(session,subject,modality,
         slice_thickness = bids_extract(bids_data,
                                        'SliceThickness',
                                        '0.0')
-                
-        if series_number in xnat_experiment.scans:
-            xnat_scan = xnat_experiment.scans[series_number]
-        else:
+        # If there isn't a scan we need to create one
+        # If the scan isn't in the list, we need to create one
+        xnat_scan = None
+        if xnat_experiment.scans:
+            if series_number in xnat_experiment.scans:
+                xnat_scan = xnat_experiment.scans[series_number]
+        if xnat_scan is None:
             if modality == "MR":
                 xnat_scan = session.classes.MrScanData(
                     parent=xnat_experiment, 
@@ -172,23 +175,28 @@ def create_experiment(session,subject,modality,
                 xnat_scan = session.classes.PetScanData(
                     parent=xnat_experiment, 
                     id=series_number, 
-                    type=series_number, 
+                    type=series_description, 
                     series_description=series_description
                     )
-
-        if resource in xnat_scan.resources:
-            xnat_resource = xnat_scan.resources[resource]
-        else:
+        xnat_resource = None
+        if xnat_scan.resources:
+            if resource in xnat_scan.resources:
+                xnat_resource = xnat_scan.resources[resource]
+        if xnat_resource is None:
             xnat_resource = session.classes.ResourceCatalog(
                 parent=xnat_scan, label=resource)
         if nii_file.exists():
             xnat_resource.upload(str(nii_file), nii_file.name)
-            #TODO: Move to uploaded directory
-        else:
+            # Move to uploaded path when done
+            nii_new_path = nii_file.parent / 'uploaded' / nii_file.name
+            nii_file.rename(nii_new_path)
+        else:   
             print(f"[WARNING] Could not find file: {nii_file}")
         if json_file.exists():
             xnat_resource.upload(str(json_file), json_file.name)
-            #TODO: Move to uploaded directory
+            #Move to uploaded path when done
+            json_new_path = json_file.parent / 'uploaded' / json_file.name
+            json_file.rename(json_new_path)
         else:
             print(f"[WARNING] Could not find file: {json_file}")
         var_string = {
@@ -202,59 +210,6 @@ def create_experiment(session,subject,modality,
 
     return(xnat_experiment)
 
-def upload_files(session, project, subject, experiment, experiment_type, scan, scan_description, resource, data):
-    if experiment_type not in ["PT", "MR"]:
-        print(f"[ERROR] experiment type {experiment_type} not supported use 'MR' or 'CT'")
-        return
-
-    xnat_project = session.projects[project]
-    # If subject does not exist create subject
-    if subject in xnat_project.subjects:
-        xnat_subject = xnat_project.subjects[subject]
-    else:
-        xnat_subject = session.classes.SubjectData(parent=xnat_project, label=subject)
-
-    # if experiment does not create new experiment
-    if experiment in xnat_subject.experiments:
-        xnat_experiment = xnat_subject.experiments[experiment]
-    else:
-        if experiment_type == "CT":
-            xnat_experiment = session.classes.CtSessionData(parent=xnat_subject, label=experiment)
-        elif experiment_type == "MR":
-            xnat_experiment = session.classes.MrSessionData(parent=xnat_subject, label=experiment)
-        else:
-            print(f"[ERROR] experiment type {experiment_type} not supported use 'MR' or 'CT'")
-            return
-
-    # if scan does not exist create new Scan
-    if scan in xnat_experiment.scans:
-        xnat_scan = xnat_experiment.scans[scan]
-    else:
-        if experiment_type == "CT":
-            xnat_scan = session.classes.CtScanData(
-                parent=xnat_experiment, id=scan, type=scan, series_description=scan_description, label=scan
-            )
-        elif experiment_type == "MR":
-            xnat_scan = session.classes.MrScanData(
-                parent=xnat_experiment, id=scan, type=scan, series_description=scan_description, label=scan
-            )
-        else:
-            print(f"[ERROR] scan type {experiment_type} not supported use 'MR' or 'CT'")
-            return
-
-    # If resource exists create new resource
-    if resource in xnat_scan.resources:
-        xnat_resource = xnat_scan.resources[resource]
-    else:
-        xnat_resource = session.classes.ResourceCatalog(parent=xnat_scan, label=resource)
-    for file_ in data:
-        file_ = Path(file_)
-        if file_.exists():
-            xnat_resource.upload(str(file_), file_.name)
-        else:
-            print(f"[WARNING] Could not find file: {file_}")
-    pass
-
 
 def main():
     parser = argparse.ArgumentParser(
@@ -267,6 +222,8 @@ def main():
     args = parser.parse_args()
 
     in_dir=Path(args.in_path)
+    done_dir = in_dir / 'uploaded'
+    done_dir.mkdir(parents=True,exist_ok=True)
     max_i = args.stop
     start_i = args.start
     i=0
