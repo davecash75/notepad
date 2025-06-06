@@ -52,7 +52,7 @@ def create_subject(session, project, subject_label,df_subject):
         in_ethnicity = df_subject_info['ETHNIC_STR']
         in_education = df_subject_info['EDCCNTU']
         in_race = df_subject_info['RACE_STR']
-        in_apoe = df_subject_info['APOEGN']
+        in_apoe = str(df_subject_info['APOEGN'])
         subject = session.classes.SubjectData(
                 parent=project, 
                 label=subject_label)
@@ -62,8 +62,11 @@ def create_subject(session, project, subject_label,df_subject):
         subject.demographics.ethnicity = in_ethnicity
         subject.demographics.education=in_education
         subject.demographics.race = in_race
-        in_apoe = in_apoe.replace('E','')
-        in_apoe = in_apoe.replace('/','_')
+        if in_apoe == "nan":
+            in_apoe = "NA"
+        else:
+            in_apoe = in_apoe.replace('E','')
+            in_apoe = in_apoe.replace('/','_')
         # This command will have to happen after upgrade or via REST call 
         var_string = {
             "xnat:subjectData/fields/field[name=apoe]/field": in_apoe,
