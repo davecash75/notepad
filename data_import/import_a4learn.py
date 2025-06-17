@@ -64,7 +64,7 @@ def create_subject(session, project, subject_label,df_subject):
         if str(in_ethnicity) != "nan":
             subject.demographics.ethnicity = in_ethnicity
         if str(in_education) != "nan":
-            subject.demographics.education=in_education
+            subject.demographics.education=in_education if in_education <=30 else 30
         if str(in_race) != "nan":
             subject.demographics.race = in_race
         if in_apoe == "nan":
