@@ -16,9 +16,9 @@ xnat_host = "https://xnat-srv.drc.ion.ucl.ac.uk"
 # Project for data
 notepad_project = "NOTEPAD_ADNI"
 # Regex patterns to parse Subject and Image ID from paths
-subject_id_pattern = re.compile(r"^\d{3}_S_\d{4}$")
+subject_id_pattern = re.compile(r"^\d{3}_S_\d{4,5}$")
 image_id_pattern = re.compile(r"^I\d+$")
-file_pattern = re.compile(r"^ADNI_(\d{3}_S_\d{4})_.*_S(\d+)_I(\d+).[dn].*")
+file_pattern = re.compile(r"^ADNI_(\d{3}_S_\d{4,5})_.*_S(\d+)_I(\d+).[dn].*")
 datetime_pattern = re.compile(r"^20\d{2}-[01]\d-[0123]\d_[012]\d_[0-5]\d_[0-5]\d")
 
 # Which columns from ADNI MRI and PET spreadsheets should be kept
@@ -376,7 +376,11 @@ def main():
     in_ethnicity = first_row['PTETHCAT_STR']
     in_race = first_row['PTRACCAT_STR']
     in_education = first_row['PTEDUCAT']
-    in_apoe = first_row['GENOTYPE'].replace("/","_")
+    in_apoe = None
+    if first_row['GENOTYPE'] != "NaN":
+        print("Missing APOE Genotype")
+    else:
+        in_apoe = first_row['GENOTYPE'].replace("/","_")
 
     update_subject=args.update
     with xnat.connect(xnat_host) as xnat_session:
@@ -402,13 +406,14 @@ def main():
             xnat_subject.demographics.education=in_education
             xnat_subject.demographics.race = in_race
             # This command will have to happen after upgrade or via REST call 
-            apoe_string = {
-                "xnat:subjectData/fields/field[name=apoe]/field": in_apoe
-            }   
-            xnat_session.put(
-                path=f"/data/projects/{notepad_project}/subjects/{adni_subject_id}",
-                query=apoe_string
-                )
+            if in_apoe is not None:
+                apoe_string = {
+                    "xnat:subjectData/fields/field[name=apoe]/field": in_apoe
+                    }   
+                xnat_session.put(
+                    path=f"/data/projects/{notepad_project}/subjects/{adni_subject_id}",
+                    query=apoe_string
+                    )
 
     # Now we need to identify:
     # What images are DICOM and what are Nifti
