@@ -94,6 +94,19 @@ def create_experiment(session,subject,modality,
     subject_label=subject.label
     if experiment_label in subject.experiments:
         print("Subject already in project")
+        if nii_file.exists():
+            # Move to uploaded path when done
+            nii_new_path = nii_file.parent / 'uploaded' / nii_file.name
+            nii_file.rename(nii_new_path)
+        else:   
+            print(f"[WARNING] Could not find file: {nii_file}")
+        if json_file.exists():
+            #Move to uploaded path when done
+            json_new_path = json_file.parent / 'uploaded' / json_file.name
+            json_file.rename(json_new_path)
+        else:
+            print(f"[WARNING] Could not find file: {json_file}")
+        
         return(subject.experiments[experiment_label])
     else:
         print("Creating Session")
