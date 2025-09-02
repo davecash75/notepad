@@ -13,7 +13,7 @@ import argparse
 xnat_host = "https://xnat-srv.drc.ion.ucl.ac.uk"
 # Project for data
 notepad_project = "NOTEPAD_ADNI"
-mr_keep_cols = [
+mri_keep_cols = [
             'image_id','subject_id','study_id','mri_visit',
             'mri_date','mri_description','mri_thickness',
             'mri_mfr','mri_mfr_model','mri_field_str'
@@ -25,65 +25,41 @@ pet_keep_cols = [
             'pet_mfr_model','pet_radiopharm'
             ]
 
-def read_info_sheet(csv_path,modality,conducted_var=None):
+def read_info_sheet(csv_path,modality):
     img_info_path = Path(csv_path)
     df_img_info = pd.read_csv(img_info_path)
-    df_img_info["session_label"] = df_img_info["subject_id"] + "-" + df_img_info["visit"] + "-" + modality
-    # Before going crazy with this refactor make sure we understand
-    # WHat is being stored here.
-    if conducted_var is not None:
-        print("Before filtering images")
-        print(df_img_info.shape)
-        df_img_info = df_img_info.dropna(subset=conducted_var)
-        print("After filtering images")
-        print(df_img_info.shape)
-    return(df_img_info)
-
-def read_image_sheet(img_study,modality):
-    # Load in the MRI data - it's a lot of lot of data
-    # So first we are only going to keep a handful of columns
-    df_image = pd.read_csv(img_study,low_memory = False)
-    if (modality=='MR'):
-        df_image = df_image[mr_keep_cols]
-        df_image = df_image.rename(
+    if modality == "MR":
+        df_img_info  = df_img_info[mri_keep_cols]
+        df_img_info = df_img_info.rename(
             columns={'mri_visit': 'image_visit',
                     'mri_date': 'image_date',
                     'mri_description': 'image_description'}
-            )        
-        # Keeping only 3T data (some rando scans with field strength 2.89)
-        # And all of the MPRAGE have slice thicknesses less than 1.3
-        df_image = df_image.loc[df_image["mri_field_str"]>2.5]
-        #df_image = df_image.loc[df_image["mri_thickness"]<1.3]
-
+            )
     else:
-        df_image = df_image[pet_keep_cols]
-        df_image = df_image.rename(
+        df_img_info = df_img_info[pet_keep_cols]
+        df_img_info = df_img_info.rename(
             columns={'pet_visit': 'image_visit',
                     'pet_date': 'image_date',
                     'pet_description': 'image_description'}
             )
         # Remove FDG and PIB (for time being)
-        df_image = df_image.loc[df_image["pet_radiopharm"]!="18F-FDG"]
-        df_image = df_image.loc[df_image["pet_radiopharm"]!="11C-PIB"]
-    df_image = df_image.sort_values(by=['subject_id','image_date'])
-    return df_image
+        df_img_info = df_img_info.loc[df_img_info["pet_radiopharm"]!="11C-PIB"]
+   
+    return(df_img_info)
 
 def main():
 
     parser = argparse.ArgumentParser(
         description='Reconcile ADNI data with NOTEPAD XNAT')
-    parser.add_argument('--mr_info', type=str,
+    parser.add_argument('--mri', type=str,
                         required=True,
                         help='Location of spreadsheet with MR info')
-    parser.add_argument('--pet_info', type=str,
+    parser.add_argument('--pet', type=str,
                         required=True,
                         help='Location of spreadsheet with PET info')
-    parser.add_argument('--mr_image', type=str,
+    parser.add_argument('--demog', type=str,
                         required=True,
                         help='Location of detailed MRI image spreadsheet')
-    parser.add_argument('--pet_image', type=str,
-                        required=True,
-                        help='Location of detailed PET image spreadsheet')
     parser.add_argument('--registry', type=str,
                         required=True,
                         help='Location of registry spreadsheet to reconcile viscodes')
@@ -93,64 +69,55 @@ def main():
     
     # Read in relevant spreadsheet
     # This has readable viscodes
-    mr_info_path = Path(args.mr_info)
-    df_mr_info = read_info_sheet(mr_info_path,
-                                 modality="MR",
-                                 conducted_var="MMCONDCT")
+    mri_info_path = Path(args.mri)
+    df_mri = read_info_sheet(mri_info_path,
+                             modality="MR")
 
-    pet_info_path = Path(args.pet_info)
-    df_pet_info = read_info_sheet(pet_info_path,
-                                  modality="PT",
-                                  conducted_var="PET_acquired")
+    pet_info_path = Path(args.pet)
+    df_pet = read_info_sheet(pet_info_path,
+                             modality="PT")
 
- 
-    # This has the less readable VISCODE
-    # As part of this reconcile, we are going to move
-    # images from this VISCODE to the other one.
-    mr_image_path = Path(args.mr_image)
-    df_mr_image = read_image_sheet(mr_image_path,modality="MR")
-    df_mr_image = df_mr_image.groupby(["study_id","subject_id"]).first()
+    demog_path = Path(args.demog)
+    df_demog = pd.read_csv(demog_path)
 
-    pet_image_path = Path(args.pet_image)
-    df_pet_image = read_image_sheet(pet_image_path,modality="PT")
-    df_pet_image = df_pet_image.groupby(["study_id","subject_id"]).first()
-    
     registry_path = Path(args.registry)
     df_registry = pd.read_csv(registry_path)
     df_registry = df_registry[
-        ["PTID","RID","VISCODE","VISCODE2","EXAMDATE"]]
+        ["PTID","RID","VISCODE","VISCODE2","EXAMDATE"]
+        ]
     df_registry = df_registry.rename(
         columns={'PTID':'subject_id',
                  'VISCODE':'image_visit',
                  'VISCODE2':'visit'})
-    df_mr_study = pd.merge(df_mr_image,df_registry,
-                    on=['subject_id','image_visit'],
-                    how='left')
-    df_mr_info = pd.merge(df_mr_info, df_mr_study,
-                          on=['subject_id','visit'],
-                          how='left')
-    print(df_mr_info['session_label'])
-    df_mr_info = df_mr_info.set_index("session_label")
-    df_mr_info = df_mr_info.sort_index()
+    
+    df_demog = pd.merge(df_demog,df_registry,
+                              on=['subject_id','visit'],
+                              how='left')
 
-    df_mr_info["alt_session"] = df_mr_info["subject_id"] + "-" + df_mr_info["image_visit"] + "-MR"
-    print(df_mr_info)
+    df_mri = pd.merge(df_mri, df_demog,
+                      on=['subject_id','image_visit'],
+                      how='left')
+    print(df_mri[df_mri['visit'].isna()])
+    df_mri['visit'] = df_mri['visit'].fillna("Unknown")
+    df_mri["session_label"] = df_mri["subject_id"] + "-" + df_mri["visit"] + "-MR"
+    df_mri["alt_session"] = df_mri["subject_id"] + "-" + df_mri["image_visit"] + "-MR"
+    df_mri = df_mri.set_index("session_label")
+    df_mri = df_mri.sort_index()
+    print(df_mri)
 
-
-    df_pet_study = pd.merge(df_pet_image,df_registry,
-                    on=['subject_id','image_visit'],
-                    how='left')
-    df_pet_info = pd.merge(df_pet_info, df_pet_study,
-                          on=['subject_id','visit'],
-                          how='left')
-    print(df_pet_info['session_label'])
-    radiopharm = df_pet_info['pet_radiopharm'].replace('18F','')
-    df_pet_info["session_label"] = df_pet_info["session_label"] + radiopharm
-    df_pet_info["alt_session"] = df_pet_info["subject_id"] + "-" + df_pet_info["image_visit"] + "-PET" + radiopharm
-    df_pet_info = df_pet_info.set_index("session_label")
-    df_pet_info = df_pet_info.sort_index()
-    print(df_pet_info)
-
+    df_pet = pd.merge(df_pet, df_demog,
+                      on=['subject_id','image_visit'],
+                      how='left')
+    radiopharm = df_pet['pet_radiopharm'].str.replace('18F-','')
+    print(df_pet[df_pet['visit'].isna()])
+    df_pet['visit'] = df_pet['visit'].fillna("Unknown")
+    df_pet["session_label"] = df_pet["subject_id"] + "-" + df_pet["visit"] + "-PET-" + radiopharm
+    df_pet["alt_session"] = df_pet["subject_id"] + "-" + df_pet["image_visit"] + "-PET-" + radiopharm
+    df_pet = df_pet.set_index("session_label")
+    df_pet = df_pet.sort_index()
+    print(df_pet)
+    print("unknown visits")
+    print(df_pet.loc[df_pet["visit"]=="Unknown"])
     # Get all MR data and all PET data from XNAT
     # Find which datasets are missing from XNAT and report
     # This may be something that can be across projects
@@ -163,7 +130,7 @@ def main():
         xnat_project = xnat_session.projects[notepad_project]
         xnat_mr_list = xnat_project.experiments.filter({"xsiType":"xnat:mrSessionData"})
         if xnat_mr_list is not None:
-            for mr_session,mr_data in df_mr_info.iterrows():
+            for mr_session,mr_data in df_mri.iterrows():
                 print(mr_session)
                 if mr_session in xnat_mr_list: 
                     print("Match")
@@ -179,7 +146,7 @@ def main():
 
         xnat_pet_list = xnat_project.experiments.filter({"xsiType":"xnat:petSessionData"})
         if xnat_pet_list is not None:
-            for pet_session,pet_data in df_pet_info.iterrows():
+            for pet_session,pet_data in df_pet.iterrows():
                 print(pet_session)
                 if pet_session in xnat_pet_list: 
                     print("Match")
