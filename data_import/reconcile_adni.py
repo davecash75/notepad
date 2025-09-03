@@ -47,6 +47,26 @@ def read_info_sheet(csv_path,modality):
    
     return(df_img_info)
 
+def check_image_path(img_root,img_info):
+    subject_root = img_root / img_info['subject_id']
+    # First see if the subejct is there or not
+    if not subject_root.exists():
+        return(f"Missing - no subject path {img_info['subject_id']}")
+    image_description = img_info['image_description']
+    image_description = image_description.replace(';','_')
+    image_description = image_description.replace(' ','_')
+
+    imtype_root = subject_root / image_description
+    if not imtype_root.exists():
+        return(f"Missing - image type {image_description} not found in subjects")
+    # Now glob images based on series_id and image_id
+    image_id_dir = list(imtype_root.glob(f'**/I{img_info['image_id']}'))
+    if len(image_id_dir) > 0:
+        return(f"Not archived {image_id_dir}")
+    else:
+        return(f"Missing - folder for image id {img_info['image_id']} not found")
+ 
+
 def main():
 
     parser = argparse.ArgumentParser(
@@ -63,10 +83,15 @@ def main():
     parser.add_argument('--registry', type=str,
                         required=True,
                         help='Location of registry spreadsheet to reconcile viscodes')
-
+    parser.add_argument('--check_path',type=str,
+                        help="Location of root directory where downloaded files are to see if there is issue"
+                        )
+    parser.add_argument('--suppress_match',action='store_true',
+                        help="don't print information about hits.")
     
     args = parser.parse_args()
-    
+    image_root=Path(args.check_path)
+
     # Read in relevant spreadsheet
     # This has readable viscodes
     mri_info_path = Path(args.mri)
@@ -122,49 +147,81 @@ def main():
     # Find which datasets are missing from XNAT and report
     # This may be something that can be across projects
     num_mr_missing = 0
+    num_mr_not_archived = 0
     num_mr_need_changing = 0
+    num_mr_archived = 0
     num_pet_missing = 0
+    num_pet_not_archived = 0
     num_pet_need_changing = 0
+    num_pet_archived = 0
     with xnat.connect(xnat_host) as xnat_session:
         # Get list of subjects for the project. 
         xnat_project = xnat_session.projects[notepad_project]
         xnat_mr_list = xnat_project.experiments.filter({"xsiType":"xnat:mrSessionData"})
         if xnat_mr_list is not None:
             for mr_session,mr_data in df_mri.iterrows():
-                print(mr_session)
                 if mr_session in xnat_mr_list: 
-                    print("Match")
+                    mr_status = "Match"
+                    num_mr_archived = num_mr_archived + 1
                 # see if it could be in the other visit code
                 elif mr_data["alt_session"] in xnat_mr_list:
-                    print("Alt match")
                     num_mr_need_changing = num_mr_need_changing + 1
                     # and then change the name
-                    print(f"Changing {mr_data['alt_session']} to {mr_session}")
+                    mr_status = f"Alt-match: Changing {mr_data['alt_session']} to {mr_session}"
                     xnat_mr_list[mr_data["alt_session"]].label = mr_session
                 else:
-                    num_mr_missing = num_mr_missing + 1                                                  
+                    # Let's see if the files are on the server
+                    # But there is an issue with the files for some reason
+                    if image_root is not None:
+                        print("Not found - Checking path")
+                        mr_status = check_image_path(image_root,mr_data)
+                        if "Not archived" in mr_status:
+                            num_mr_not_archived = num_mr_not_archived + 1
+                        else:
+                            num_mr_missing = num_mr_missing + 1
+                    else:
+                        mr_status = "Missing"
+                        num_mr_missing = num_mr_missing + 1
+                if not args.suppress_match or mr_status != "Match": 
+                    print(f"{mr_session} - {mr_status}")
+                                                 
 
         xnat_pet_list = xnat_project.experiments.filter({"xsiType":"xnat:petSessionData"})
         if xnat_pet_list is not None:
             for pet_session,pet_data in df_pet.iterrows():
-                print(pet_session)
                 if pet_session in xnat_pet_list: 
-                    print("Match")
+                    pet_status = "Match"
+                    num_pet_archived = num_pet_archived + 1
                 # see if it could be in the other visit code
                 elif pet_data["alt_session"] in xnat_pet_list:
-                    print("Alt match")
                     num_pet_need_changing = num_pet_need_changing + 1
                     # and then change the name
-                    print(f"Changing {pet_data['alt_session']} to {pet_session}")
+                    pet_status = f"Alt-match: Changing {pet_data['alt_session']} to {pet_session}"
                     xnat_pet_list[pet_data["alt_session"]].label = pet_session
-                else:
-                    num_pet_missing = num_pet_missing + 1  
+                    # Let's see if the files are on the server
+                    # But there is an issue with the files for some reason
+                    if image_root is not None:
+                        print("Not found - Checking path")
+                        pet_status = check_image_path(image_root,pet_data)
+                        if "Not archived" in pet_status:
+                            num_pet_not_archived = num_pet_not_archived + 1
+                        else:
+                            num_pet_missing = num_pet_missing + 1
+                    else:
+                        pet_status = "Missing"
+                        num_pet_missing = num_pet_missing + 1
+                if not args.suppress_match or pet_status != "Match": 
+                    print(f"{pet_session} - {pet_status}")
     print("MRI images:")
     print(f"Number MRI missing: {num_mr_missing}")
     print(f"Number MRI needing changes: {num_mr_need_changing}")
+    if image_root is not None:
+        print(f"Number of MRI present but not archived: {num_mr_not_archived}")
     print("PET images:")
     print(f"Number PET missing: {num_pet_missing}")
     print(f"Number PET needing changes: {num_pet_need_changing}")
+    if image_root is not None:
+        print(f"Number of PET present but not archived: {num_pet_not_archived}")
     
 if __name__ == "__main__":
     main()
