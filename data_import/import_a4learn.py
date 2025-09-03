@@ -311,8 +311,15 @@ def main():
             print(f"Visit ID: {visit_id}")
             print(f"Modality: {modality}")
             print(f"Sequence/Tracer: {submodality}")
+            visit_info = None
             if (subject_id,visit_id) in df_visits.index:
                 visit_info = df_visits.loc[(subject_id,visit_id)]
+            elif visit_id=='999':
+                if (subject_id,'997') in df_visits.index:
+                    visit_info = df_visits.loc[(subject_id,'997')]
+                elif (subject_id,'998') in df_visits.index:
+                    visit_info = df_visits.loc[(subject_id,'998')]                
+            if visit_info is not None:
                 print(visit_info)
                 visit_label = visit_info['VISIT']
                 days_to_random = visit_info['SVSTDTC_DAYS_T0']
