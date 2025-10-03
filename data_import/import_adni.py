@@ -91,6 +91,28 @@ def parse_image_filename(file_path):
         series_id = int(file_info.group(2))
     return (image_id, series_id)
 
+def read_info_sheet(csv_path,modality):
+    img_info_path = Path(csv_path)
+    df_img_info = pd.read_csv(img_info_path)
+    if modality == "MR":
+        df_img_info  = df_img_info[mri_keep_cols]
+        df_img_info = df_img_info.rename(
+            columns={'mri_visit': 'image_visit',
+                    'mri_date': 'image_date',
+                    'mri_description': 'image_description'}
+            )
+    else:
+        df_img_info = df_img_info[pet_keep_cols]
+        df_img_info = df_img_info.rename(
+            columns={'pet_visit': 'image_visit',
+                    'pet_date': 'image_date',
+                    'pet_description': 'image_description'}
+            )
+        # Remove FDG and PIB (for time being)
+        df_img_info = df_img_info.loc[df_img_info["pet_radiopharm"]!="11C-PIB"]
+   
+    return(df_img_info)
+
 def process_image_list(subject_id,image_list,adni_studies,
                        df_mr,df_pet,
                        dcm_flag=True):
@@ -189,36 +211,6 @@ def process_study_sheet(img_info):
     df_info['PTGENDER_STR'] = df_info['PTGENDER'].map(gender_map)
     return df_info
 
-# This processes the imaging metadata sheet
-def process_image_sheet(img_study,modality):
-    # Load in the MRI data - it's a lot of lot of data
-    # So first we are only going to keep a handful of columns
-    df_image = pd.read_csv(img_study,low_memory = False)
-    if (modality=='MR'):
-        df_image = df_image[mr_keep_cols]
-        df_image = df_image.rename(
-            columns={'mri_visit': 'image_visit',
-                    'mri_date': 'image_date',
-                    'mri_description': 'image_description'}
-            )        
-        # Keeping only 3T data (some rando scans with field strength 2.89)
-        # And all of the MPRAGE have slice thicknesses less than 1.3
-        df_image = df_image.loc[df_image["mri_field_str"]>2.5]
-        #df_image = df_image.loc[df_image["mri_thickness"]<1.3]
-
-    else:
-        df_image = df_image[pet_keep_cols]
-        df_image = df_image.rename(
-            columns={'pet_visit': 'image_visit',
-                    'pet_date': 'image_date',
-                    'pet_description': 'image_description'}
-            )
-        # Remove FDG and PIB (for time being)
-        df_image = df_image.loc[df_image["pet_radiopharm"]!="18F-FDG"]
-        df_image = df_image.loc[df_image["pet_radiopharm"]!="11C-PIB"]
-    df_image = df_image.sort_values(by=['subject_id','image_date'])
-    return df_image
-
 def get_scan_number(dcm_file_list):
     scan_number_list = []
     for f in dcm_file_list:
@@ -298,18 +290,18 @@ def main():
     parser.add_argument('--in_path', type=str,
                         required=True,
                         help='Path to subject to upload')
-    parser.add_argument('--mr_study', type=str,
+    parser.add_argument('--mri', type=str,
                         required=True,
-                        help='Location of spreadsheet with study info for visits with MR data')
-    parser.add_argument('--mr_image', type=str,
+                        help='Location of spreadsheet with MR info')
+    parser.add_argument('--pet', type=str,
                         required=True,
-                        help='Location of spreadsheet with image info for visits with MR data')
-    parser.add_argument('--pet_study', type=str,
+                        help='Location of spreadsheet with PET info')
+    parser.add_argument('--demog', type=str,
                         required=True,
-                        help='Location of spreadsheet with study info for visits with PET data')
-    parser.add_argument('--pet_image', type=str,
+                        help='Location of detailed MRI image spreadsheet')
+    parser.add_argument('--registry', type=str,
                         required=True,
-                        help='Location of spreadsheet with image info for visits with PET data')
+                        help='Location of registry spreadsheet to reconcile viscodes')
     parser.add_argument('--update',action='store_true',
                         help='Update existing records if already on XNAT')
     args = parser.parse_args()
@@ -325,31 +317,53 @@ def main():
         sys.exit(1)
 
 
-    print(f'Subject {adni_subject_id}')    
+    print(f"Subject {adni_subject_id}")    
 
     # Load in the data from the info sheet
-    df_mr_info = process_study_sheet(args.mr_study)
-    df_pet_info = process_study_sheet(args.pet_study)
+    mri_info_path = Path(args.mri)
+    df_mri = read_info_sheet(mri_info_path,
+                             modality="MR")
 
+    pet_info_path = Path(args.pet)
+    df_pet = read_info_sheet(pet_info_path,
+                             modality="PT")
 
-    df_mr_image = process_image_sheet(args.mr_image,modality='MR')
-    df_pet_image = process_image_sheet(args.pet_image,modality='PT')
-    
-    # Now merge the two
-    df_mr_info = pd.merge(df_mr_info,df_mr_image,
-                    left_on=['subject_id','visit'],
-                    right_on=['subject_id','image_visit'],
-                    how='outer')
-    df_mr_info = df_mr_info.set_index('image_id')
+    demog_path = Path(args.demog)
+    df_demog = pd.read_csv(demog_path)
 
-    df_pet_info = pd.merge(df_pet_info,df_pet_image,
-                    left_on=['subject_id','visit'],
-                    right_on=['subject_id','image_visit'],
-                    how='outer')
-    df_pet_info = df_pet_info.set_index('image_id')
+    registry_path = Path(args.registry)
+    df_registry = pd.read_csv(registry_path)
+    df_registry = df_registry[
+        ["PTID","RID","VISCODE","VISCODE2","EXAMDATE"]
+        ]
+    df_registry = df_registry.rename(
+        columns={'PTID':'subject_id',
+                 'VISCODE':'image_visit',
+                 'VISCODE2':'visit'})
+   
+    df_mri = pd.merge(df_mri, df_demog,
+                      on=['subject_id','image_visit'],
+                      how='left')
+    print(df_mri[df_mri['visit'].isna()])
+    df_mri['visit'] = df_mri['visit'].fillna("Unknown")
+    df_mri["session_label"] = df_mri["subject_id"] + "-" + df_mri["visit"] + "-MR"
+    df_mri = df_mri.set_index("session_label")
+    df_mri = df_mri.sort_index()
+    print(df_mri)
+
+    df_pet = pd.merge(df_pet, df_demog,
+                      on=['subject_id','image_visit'],
+                      how='left')
+    radiopharm = df_pet['pet_radiopharm'].str.replace('18F-','')
+    print(df_pet[df_pet['visit'].isna()])
+    df_pet['visit'] = df_pet['visit'].fillna("Unknown")
+    df_pet["session_label"] = df_pet["subject_id"] + "-" + df_pet["visit"] + "-PET-" + radiopharm
+    df_pet = df_pet.set_index("session_label")
+    df_pet = df_pet.sort_index()
+    print(df_pet)
 
     # Find the rows that matches the subject and scan
-    df_subject = df_mr_info.loc[df_mr_info['subject_id']==adni_subject_id]
+    df_subject = df_mri.loc[df_mri['subject_id']==adni_subject_id]
     df_subject_demog = df_subject.dropna(subset='PTDOBYY')
     yob_constant = df_subject_demog['PTDOBYY'].all()
     gender_constant = df_subject_demog['PTGENDER'].all()
