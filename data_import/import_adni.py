@@ -19,10 +19,10 @@ notepad_project = "NOTEPAD_ADNI"
 subject_id_pattern = re.compile(r"^\d{3}_S_\d{4,5}$")
 image_id_pattern = re.compile(r"^I\d+$")
 file_pattern = re.compile(r"^ADNI_(\d{3}_S_\d{4,5})_.*_S(\d+)_I(\d+).[dn].*")
-datetime_pattern = re.compile(r"^20\d{2}-[01]\d-[0123]\d_[012]\d_[0-5]\d_[0-5]\d")
+datetime_pattern = re.compile(r"^20\d{2}-[01]\d-[0123]\d_[012]\d_[0-5]\d")
 
 # Which columns from ADNI MRI and PET spreadsheets should be kept
-mr_keep_cols = [
+mri_keep_cols = [
             'image_id','subject_id','study_id','mri_visit',
             'mri_date','mri_description','mri_thickness',
             'mri_mfr','mri_mfr_model','mri_field_str'
@@ -54,7 +54,9 @@ race_map = {
     4: "Black or African American",
     5: "White",
     6: "More than one race",
-    7: "Unknown"
+    7: "Unknown",
+    8: "Native Hawaiian",
+    9: "Other Pacific Islander"
 }
 
 # This just extracts the bit of path that matches the pattern
@@ -78,18 +80,6 @@ def get_image_ids(in_path,path_glob,id_list):
         if image_id not in id_list:
             id_list.append(image_id)
 
-def parse_image_filename(file_path):
-    file_info = re.match(file_pattern,file_path.name)
-    if file_info is None:
-        image_id = extract_from_path(file_path.parent,image_id_pattern)
-        image_id = int(image_id.replace('I',''))
-        scandate = extract_from_path(file_path.parent,datetime_pattern)
-        series_id = scandate.replace('_','')
-        series_id = int(series_id.replace('-',''))
-    else:
-        image_id = int(file_info.group(3))
-        series_id = int(file_info.group(2))
-    return (image_id, series_id)
 
 def read_info_sheet(csv_path,modality):
     img_info_path = Path(csv_path)
@@ -113,82 +103,98 @@ def read_info_sheet(csv_path,modality):
    
     return(df_img_info)
 
+def parse_image_filename(file_path):
+    file_info = re.match(file_pattern,file_path.name)
+    if file_info is None:
+        image_id = extract_from_path(file_path.parent,image_id_pattern)
+        image_id = int(image_id.replace('I',''))
+        scandate = extract_from_path(file_path.parent,datetime_pattern)
+        series_id = scandate.replace('_','')
+        series_id = int(series_id.replace('-',''))
+    else:
+        image_id = int(file_info.group(3))
+        series_id = int(file_info.group(2))
+    return (image_id, series_id, file_path)
+
 def process_image_list(subject_id,image_list,adni_studies,
-                       df_mr,df_pet,
+                       df_image_info,
                        dcm_flag=True):
-    current_image_id = None
-    df_session = None
-    adni_info={}
+    # Loop through the images found in the file
+    image_file_info = []
+
     for f in image_list:
-        image_id, series_id = parse_image_filename(f)
-        # To avoid reading in the spreadsheet for every file
-        # Just change it when a new image pops up
-        if image_id != current_image_id:
-            # Grab releant info from image spreadsheets
-            modality=""
-            xnat_session_label = None
-            if image_id in df_mr.index:
-                df_session = df_mr.loc[image_id].squeeze()
-                modality = "MR"
-            elif image_id in df_pet.index:
-                df_session = df_pet.loc[image_id].squeeze()
-                radiopharm = df_session['pet_radiopharm'].replace('18F-','')
-                modality = f"PET-{radiopharm}"
-            else:
-                print(f'WARNING: Could not find {image_id} in the spreadsheets')
-                print('Skipping this session for now')
-                continue
-            # Make a dict to store the relevant information
-            # So it is to hand for the next image
-            # if it is from the same image ID
-            adni_info['image_id'] = image_id
-            adni_info['series_id'] = series_id
-            adni_info['visit_id'] = df_session['visit']
-            adni_info['study_id'] = int(df_session['study_id'])
-            adni_info['image_date'] = df_session['image_date']
-            image_description = df_session['image_description']
-            image_description = image_description.replace(';','_')
-            image_description = image_description.replace(' ','_')
-            adni_info['image_description'] = image_description
-            adni_info['session_label'] = f"{subject_id}-{adni_info['visit_id']}-{modality}"
-            current_image_id = image_id
-        # If we don't have information for this study ID
-        # Add it
-        if adni_info['study_id'] not in adni_studies:
+        # Extract the series ID and image ID from the filename
+        image_series_id = parse_image_filename(f)
+        image_file_info.append(image_series_id)
+    # Take the list of tuples and turn them into a dataframe
+    df_image_files = pd.DataFrame(
+        image_file_info,
+        columns=['image_id','series_id','file_path']
+        )
+
+    # So that we can drop the duplicates
+    df_image_ids = df_image_files.drop_duplicates(
+        subset=['image_id','series_id']
+        )
+
+    # We need all of the relevant info to upload these
+    # So merge this with the combined image sheet
+    df_images_to_process= pd.merge(df_image_ids,
+                                   df_image_info,
+                                   how='left',
+                                   left_on='image_id',
+                                   right_index=True,
+                                   indicator=True
+                                   )
+    print(df_images_to_process)
+    
+    # So the images_to_process dataframe contains
+    # All of the information for the files that are in the filelist
+    # We may need to modify the image description to match paths
+    # image_description = df_session['image_description']
+    # image_description = image_description.replace(';','_')
+    # image_description = image_description.replace(' ','_')
+    # adni_info['image_description'] = image_description
+    
+    # If we don't have information for this study ID
+    for img_row in df_images_to_process.itertuples():
+        print(img_row)
+        if img_row.study_id not in adni_studies:
             study_info = {
-                'modality': modality,
-                'visit_id': adni_info['visit_id'],
-                'image_date': adni_info['image_date'],
-                'session_id': adni_info['session_label'],
+                'image_date': img_row.image_date,
+                'session_id': img_row.session_label,
                 'series_list' : {},
             }
-            adni_studies[adni_info['study_id']] = study_info
-        series_map = adni_studies[adni_info['study_id']]['series_list']
-        if adni_info['series_id'] not in series_map:
-            xnat_scan_number = str(adni_info['series_id'])
+            adni_studies[img_row.study_id] = study_info
+        series_map = adni_studies[img_row.study_id]['series_list']
+        if img_row.series_id not in series_map:
+            xnat_scan_number = str(img_row.series_id)
             if dcm_flag:
-                with dcm.dcmread(f) as ds:
+                with dcm.dcmread(img_row.file_path) as ds:
                     if ds.SeriesNumber is not None:
                         xnat_scan_number = str(ds.SeriesNumber)
             series_info = {
                 'scan_number': xnat_scan_number,
                 'image_list':{},
                 }
-            print(series_id)
+            print(img_row.series_id)
             print(series_info['scan_number'])
-            series_map[adni_info['series_id']] = series_info
-        image_map = series_map[adni_info['series_id']]['image_list']
-        if adni_info['image_id'] not in image_map:
+            series_map[img_row.series_id] = series_info
+        image_map = series_map[img_row.series_id]['image_list']
+        if img_row.image_id not in image_map:
             image_info = {
-                'image_description': adni_info['image_description'],
+                'image_description': img_row.image_description,
                 'dcm_files': [],
                 'nii_files': [],
             }
-            image_map[adni_info['image_id']] = image_info
+            image_map[img_row.image_id] = image_info
+        df_image_subset = df_image_files.loc[
+            df_image_files['image_id']==img_row.image_id,'file_path'
+            ]
+        file_type = 'nii_files'
         if dcm_flag:        
-            image_map[adni_info['image_id']]['dcm_files'].append(f)
-        else:
-            image_map[adni_info['image_id']]['nii_files'].append(f)
+            file_type = 'dcm_files'
+        image_map[img_row.image_id][file_type] = df_image_subset.tolist()
             
 
 
@@ -204,6 +210,8 @@ def process_study_sheet(img_info):
     df_info.loc[df_info['PTRACCAT']=='2|4','PTRACCAT'] = 6
     df_info.loc[df_info['PTRACCAT']=='2|5','PTRACCAT'] = 6
     df_info.loc[df_info['PTRACCAT']=='4|5','PTRACCAT'] = 6
+    df_info.loc[df_info['PTRACCAT']=='5|8','PTRACCAT'] = 6
+    df_info.loc[df_info['PTRACCAT']=='1|4|5','PTRACCAT'] = 6
     df_info.loc[df_info['PTRACCAT']=='3|4|5','PTRACCAT'] = 6
     df_info['PTRACCAT'] = pd.to_numeric(df_info['PTRACCAT'])
     df_info['PTETHCAT_STR'] = df_info['PTETHCAT'].map(ethnicity_map)
@@ -329,7 +337,7 @@ def main():
                              modality="PT")
 
     demog_path = Path(args.demog)
-    df_demog = pd.read_csv(demog_path)
+    df_demog = process_study_sheet(demog_path)
 
     registry_path = Path(args.registry)
     df_registry = pd.read_csv(registry_path)
@@ -340,30 +348,41 @@ def main():
         columns={'PTID':'subject_id',
                  'VISCODE':'image_visit',
                  'VISCODE2':'visit'})
-   
+    df_demog = pd.merge(df_demog,df_registry,
+                              on=['subject_id','visit'],
+                              how='left')
     df_mri = pd.merge(df_mri, df_demog,
                       on=['subject_id','image_visit'],
                       how='left')
-    print(df_mri[df_mri['visit'].isna()])
     df_mri['visit'] = df_mri['visit'].fillna("Unknown")
     df_mri["session_label"] = df_mri["subject_id"] + "-" + df_mri["visit"] + "-MR"
     df_mri = df_mri.set_index("session_label")
     df_mri = df_mri.sort_index()
-    print(df_mri)
+    print("Unknown MRI visits")
+    print(df_mri.loc[df_mri["visit"]=="Unknown"])
 
     df_pet = pd.merge(df_pet, df_demog,
                       on=['subject_id','image_visit'],
                       how='left')
     radiopharm = df_pet['pet_radiopharm'].str.replace('18F-','')
-    print(df_pet[df_pet['visit'].isna()])
+
     df_pet['visit'] = df_pet['visit'].fillna("Unknown")
     df_pet["session_label"] = df_pet["subject_id"] + "-" + df_pet["visit"] + "-PET-" + radiopharm
     df_pet = df_pet.set_index("session_label")
     df_pet = df_pet.sort_index()
-    print(df_pet)
 
+    print("Unknown PET visits")
+    print(df_pet.loc[df_pet["visit"]=="Unknown"])
+
+    # Concatenate the MRI and the PET into the same table
+    df_images = pd.concat([df_mri,df_pet])
+    df_images = df_images.reset_index()
+    df_images = df_images.set_index('image_id')
+    #print(df_images)
+    subject_images = df_images.loc[df_images['subject_id']==adni_subject_id],['subject_id','image_id','visit','image_visit']
+    #print(subject_images)
     # Find the rows that matches the subject and scan
-    df_subject = df_mri.loc[df_mri['subject_id']==adni_subject_id]
+    df_subject = df_demog.loc[df_demog['subject_id']==adni_subject_id]
     df_subject_demog = df_subject.dropna(subset='PTDOBYY')
     yob_constant = df_subject_demog['PTDOBYY'].all()
     gender_constant = df_subject_demog['PTGENDER'].all()
@@ -384,7 +403,7 @@ def main():
     # first row is OK
     # This information will be included when creating the subject
     first_row = df_subject_demog.iloc[0]
-    print(first_row)
+    #print(first_row)
     in_yob = first_row['PTDOBYY']
     in_gender = first_row['PTGENDER_STR']
     in_ethnicity = first_row['PTETHCAT_STR']
@@ -453,12 +472,28 @@ def main():
     upload_studies = {}
 
     dcm_files = in_path.glob('**/*.dcm')
-    process_image_list(adni_subject_id,dcm_files,upload_studies,
-                       df_mr_info,df_pet_info,dcm_flag=True)
+    if not dcm_files:
+        print("No DICOM files found")
+    else:
+        process_image_list(
+            adni_subject_id,
+            dcm_files,
+            upload_studies,
+            df_images,
+            dcm_flag=True
+            )
 
     nii_files = in_path.glob('**/*.nii.gz')
-    process_image_list(adni_subject_id,nii_files,upload_studies,
-                       df_mr_info,df_pet_info,dcm_flag=False)
+    if not nii_files:
+        print("No nifti files found")
+    else:
+        process_image_list(
+            adni_subject_id,
+            nii_files,
+            upload_studies,
+            df_images,
+            dcm_flag=False
+            )
  
     with xnat.connect(xnat_host) as xnat_session:
         # Get list of subjects for the project. 
@@ -496,10 +531,14 @@ def main():
                     print(f"Total DICOM files: {n_total_dcm}")
                     zip_path = make_dcm_zip(study_dcm_list,
                                             study_id)
-                    archive_session = xnat_session.services.import_(
-                                zip_path, project=notepad_project, 
-                                subject=adni_subject_id,
-                                experiment=xnat_session_label)
+                    try:
+                        archive_session = xnat_session.services.import_(
+                                    zip_path, project=notepad_project, 
+                                    subject=adni_subject_id,
+                                    experiment=xnat_session_label,
+                                    content_type='application/zip')
+                    except xnat.exceptions.XNATUploadError:
+                        print("Error uploading ZIP file")
                     for f in study_dcm_list:
                         f.unlink()
             else:
