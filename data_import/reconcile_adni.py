@@ -35,7 +35,7 @@ def read_info_sheet(csv_path,modality):
                     'mri_date': 'image_date',
                     'mri_description': 'image_description'}
             )
-        df_image = df_image.loc[df_image["mri_field_str"]>2.5]
+        df_img_info = df_img_info.loc[df_img_info["mri_field_str"]>2.5]
     else:
         df_img_info = df_img_info[pet_keep_cols]
         df_img_info = df_img_info.rename(
@@ -214,11 +214,13 @@ def main():
                 if not args.suppress_match or pet_status != "Match": 
                     print(f"{pet_session} - {pet_status}")
     print("MRI images:")
+    print(f"Number MRI archived in XNAT: {num_mr_archived}")
     print(f"Number MRI missing: {num_mr_missing}")
     print(f"Number MRI needing changes: {num_mr_need_changing}")
     if image_root is not None:
         print(f"Number of MRI present but not archived: {num_mr_not_archived}")
     print("PET images:")
+    print(f"Number PET archived in XNAT: {num_pet_archived}")
     print(f"Number PET missing: {num_pet_missing}")
     print(f"Number PET needing changes: {num_pet_need_changing}")
     if image_root is not None:
