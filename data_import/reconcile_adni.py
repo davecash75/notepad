@@ -35,6 +35,7 @@ def read_info_sheet(csv_path,modality):
                     'mri_date': 'image_date',
                     'mri_description': 'image_description'}
             )
+        df_image = df_image.loc[df_image["mri_field_str"]>2.5]
     else:
         df_img_info = df_img_info[pet_keep_cols]
         df_img_info = df_img_info.rename(
