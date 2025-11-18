@@ -284,7 +284,7 @@ def main():
     df_subject.loc[df_subject['hispanic_or_latino'].isna(),'ETHNIC_STR'] = "Unknown"
     df_subject['SEX_STR'] = df_subject['SEX'].map(gender_map)
 
-    visit_info_sheet = in_dir / 'fqryStatisticalData.csv'
+    visit_info_sheet = in_dir / 'Data' / 'fqryStatisticalData.csv'
     df_visit = pd.read_csv(visit_info_sheet)
     df_visit = df_visit.sort_values(by=['wrapnum','VisNo'])
     df_visit = df_visit.set_index('wrapnum')
@@ -296,7 +296,7 @@ def main():
                                   right_index=True,
                                   validate="one_to_many") 
 
-    cdr_sheet = in_dir / 'CDR.csv'
+    cdr_sheet = in_dir / 'Data' / 'CDR.csv'
     df_cdr = pd.read_csv(cdr_sheet)
     df_cdr = df_cdr.sort_values(by=['wrapnum','VisNo'])
     df_cdr = df_cdr.set_index('wrapnum')
@@ -306,13 +306,13 @@ def main():
                          'CDRRating',
                          'estimated_questionnaire_days_after_baseline']]
     
-    mmse_sheet = in_dir / 'NeuropsychScores.csv'
+    mmse_sheet = in_dir / 'Data' / 'NeuropsychScores.csv'
     df_mmse = pd.read_csv(mmse_sheet)
     df_mmse = df_mmse.sort_values(by=['wrapnum','VisNo'])
     df_mmse = df_mmse.set_index('wrapnum')
     df_mmse = df_mmse.loc[:,['VisNo','mmseTot']]
     
-    apoe_sheet = in_dir / 'APG.csv'
+    apoe_sheet = in_dir / 'Data' / 'APG.csv'
     df_apoe = pd.read_csv(apoe_sheet)
     df_apoe = df_apoe.set_index('wrapnum')
     df_apoe = df_apoe.loc[:,['all1','all2']]
