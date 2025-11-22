@@ -46,7 +46,7 @@ def create_subject(session, project, subject_label,df_subject):
         return None
     else:
         print("Creating Subject")
-        df_subject_info = df_subject.loc[subject_label]
+        df_subject_info = df_subject.loc[[subject_label],:]
         first_visit = df_subject_info.iloc[0]
         in_age = first_visit['Age_At_Baseline_Int']
         in_gender = first_visit['SEX_STR']
@@ -86,7 +86,7 @@ def create_subject(session, project, subject_label,df_subject):
         return(subject)
 
 def find_cog_scores(subject,age,df_visits,df_cdr, df_mmse):
-    df_subject_visits = df_visits.loc[subject,:]
+    df_subject_visits = df_visits.loc[[subject],:]
     print(df_subject_visits['Age_At_Visit'])
     df_subject_visits['diff_to_scan'] = df_subject_visits['Age_At_Visit'] - float(age[:3])
     # Modified from Source - https://stackoverflow.com/a
