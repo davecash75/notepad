@@ -41,7 +41,7 @@ def get_session_list(xnat_host,project,modality):
             print(f"No sessions of {xsi_type} in {xnat_host}")
     return(df_sessions)
 
-def transfer_session(df_transfer):
+def transfer_session(df_transfer, scan_filter=[]):
     for label,session_data in df_transfer.iterrows():
         print(label)
         dl_path=Path(f"/tmp/{label}")
@@ -50,11 +50,17 @@ def transfer_session(df_transfer):
                           loglevel="ERROR") as xnat_source_server:
             experiment_uri = f"/REST/projects/{cnda_project}/experiments/{label}"
             experiment = xnat_source_server.create_object(experiment_uri)
-            t1_scans = [x.id for x in experiment.scans if "MPRAGE" in x.type]
-            flair_scans = [x.id for x in experiment.scans if "FLAIR" in x.type]
-            scans_to_upload = t1_scans + flair_scans
-            for scan_id in scans_to_upload:
-                experiment.scans[scan_id].download_dir("/tmp")
+            # If we are filteirng out scans (so we only get MPRAGE and FLAIR)
+            # Find the right IDS and only download those
+            # Otherwise download the whole experiment.
+            if scan_filter:
+                filtered_scans = []
+                for filter_name in scan_filter:
+                    filtered_scans = filtered_scans + [x.id for x in experiment.scans if filter_name in x.type]
+                for scan_id in filtered_scans:
+                    experiment.scans[scan_id].download_dir("/tmp")
+            else:
+                experiment.download_dir("/tmp")
         with xnat.connect(notepad_uri,
                           extension_types=False,
                           loglevel="ERROR") as xnat_dest_server: 
@@ -124,14 +130,14 @@ def main():
                             df_mrsessions,
                             how="right",
                             suffixes=['_local',''],
-                            on=["subjectlabel,label"],
+                            on=["subject_label","label"],
                             indicator = True
                             )
         df_toupload = df_toupload.loc[df_toupload["_merge"]=="right_only"]
 
     df_toupload = df_toupload.set_index('label')
     print(len(df_toupload))
-    transfer_session(df_toupload)
+    transfer_session(df_toupload,["MPRAGE","FLAIR"])
     df_petuploaded = get_session_list(notepad_uri,
                                      notepad_project,
                                      "pet")
@@ -142,7 +148,7 @@ def main():
                             df_petsessions,
                             how="right",
                             suffixes=['_local',''],
-                            on=["subjectlabel,label"],
+                            on=["subject_label","label"],
                             indicator = True
                             )
         df_toupload = df_toupload.loc[df_toupload["_merge"]=="right_only"]
