@@ -70,6 +70,8 @@ def transfer_session(df_transfer, scan_filter=[]):
                 xnat_dest_subject = xnat_dest_server.classes.SubjectData(
                 parent=dest_project, 
                 label=session_data.subject_label)
+            else:
+                xnat_dest_subject = dest_subjects[session_data.subject_label]
             archive_session = xnat_dest_server.services.import_dir(
                                 dl_path, 
                                 project=dest_project, 
