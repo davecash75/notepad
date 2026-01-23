@@ -24,7 +24,7 @@ def get_session_list(xnat_host,project,modality):
         experiments_uri = f"/REST/projects/{project}/experiments"
         xsi_type = f"xnat:{modality}SessionData"
         sessions_query = {
-            "xsi_type": xsi_type,
+            "xsiType": xsi_type,
             "columns": "subject_label,label,date,time"
         }
         print(f"Getting sessions of {xsi_type} from {xnat_host}") 
@@ -44,7 +44,33 @@ def get_session_list(xnat_host,project,modality):
 def transfer_session(df_transfer):
     for label,session_data in df_transfer.iterrows():
         print(label)
-        print(session_data)
+        dl_path=Path(f"/tmp/{label}")
+        with xnat.connect(cnda_uri,
+                          extension_types=False,
+                          loglevel="ERROR") as xnat_source_server:
+            experiment_uri = f"/REST/projects/{cnda_project}/experiments/{label}"
+            experiment = xnat_source_server.create_object(experiment_uri)
+            t1_scans = [x.id for x in experiment.scans if "MPRAGE" in x.type]
+            flair_scans = [x.id for x in experiment.scans if "FLAIR" in x.type]
+            scans_to_upload = t1_scans + flair_scans
+            for scan_id in scans_to_upload:
+                experiment.scans[scan_id].download_dir("/tmp")
+        with xnat.connect(notepad_uri,
+                          extension_types=False,
+                          loglevel="ERROR") as xnat_dest_server: 
+            dest_project = xnat_dest_server.projects[notepad_project]
+            dest_subjects = dest_project.subjects
+            if session_data.subject_label not in dest_subjects:
+                xnat_dest_subject = xnat_dest_server.classes.SubjectData(
+                parent=dest_project, 
+                label=session_data.subject_label)
+            archive_session = xnat_dest_server.services.import_dir(
+                                dl_path, 
+                                project=dest_project, 
+                                subject=xnat_dest_subject,
+                                experiment=label)
+            
+
 def main():
     parser = argparse.ArgumentParser(
         description='Import DIAN CNDA DICOM to NOTEPAD XNAT')
