@@ -140,9 +140,14 @@ def main():
     df_toupload = df_toupload.set_index('label')
     print(len(df_toupload))
     transfer_session(df_toupload,["MPRAGE","FLAIR"])
-    df_petuploaded = get_session_list(notepad_uri,
+    # Need to account for PET sessions being uploaded as PET-MR
+    df_petonlyuploaded = get_session_list(notepad_uri,
                                      notepad_project,
                                      "pet")
+    df_petmruploaded = get_session_list(notepad_uri,
+                                     notepad_project,
+                                     "petmr")
+    df_petuploaded = pd.concat([df_petonlyuploaded,df_petmruploaded])
     if df_petuploaded.empty:
         df_toupload = df_petsessions
     else:
