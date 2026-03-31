@@ -42,7 +42,7 @@ def create_subject(session, project, subject_label,df_subject):
         print("Subject already in project")
         return(project.subjects[subject_label])
     elif subject_label not in df_subject.index:
-        print("This subject ID not in main subject info spreadsheet")
+        print("This subject ID is not in the main subject info spreadsheet")
         return None
     else:
         print("Creating Subject")
@@ -86,6 +86,9 @@ def create_subject(session, project, subject_label,df_subject):
         return(subject)
 
 def find_cog_scores(subject,age,df_visits,df_cdr, df_mmse):
+    cdr_global = 'NA'
+    cdr_sum = '-1'
+    mmse = '-1'
     df_subject_visits = df_visits.loc[[subject],:]
     print(df_subject_visits['Age_At_Visit'])
     df_subject_visits['diff_to_scan'] = df_subject_visits['Age_At_Visit'] - float(age[:3])
@@ -98,9 +101,6 @@ def find_cog_scores(subject,age,df_visits,df_cdr, df_mmse):
     print(f"Visit Number: {closest_visit}")
     print(f"Age At Visit: {df_closest_visit['Age_At_Visit']}")
     print(f"Diff From Image: {df_closest_visit['diff_to_scan']}")
-    cdr_global = 'NA'
-    cdr_sum = '-1'
-    mmse = '-1'
 
     # Find the right visit code for the imaging visit
     if subject in df_cdr.index:
@@ -364,10 +364,12 @@ def main():
     df_visit['Age_At_Visit'] = df_visit['Age_At_Baseline_Int'] + \
         (df_visit['Days_Since_Baseline'] / 365.25)
     
-    df_subject = df_subject.merge(df_visit, how="left",
-                                  left_index=True,
-                                  right_index=True,
-                                  validate="one_to_many") 
+    df_subject_visit = df_subject.merge(
+        df_visit, how="left",
+        left_index=True,
+        right_index=True,
+        validate="one_to_many"
+        ) 
 
     cdr_sheet = in_dir / 'Data' / 'CDR.csv'
     df_cdr = pd.read_csv(cdr_sheet,
@@ -429,25 +431,24 @@ def main():
             xnat_subject = create_subject(xnat_session,
                                           xnat_project,
                                           subject_id,
-                                          df_subject)
-
-            cog_values = find_cog_scores(
-                subject_id,
-                scan_age, 
-                df_visit,
-                df_cdr,
-                df_mmse
-                )
-            
-            if modality=="PET":
-                radiopharm = image_type.replace("11CPiB","PIB")
-                radiopharm = image_type.replace("18FMK6240","MK6240")
-                radiopharm = image_type.replace("18FNAV4694","NAV4694")
-                experiment_id = f"{subject_id}-v{scan_age}-{modality}-{radiopharm}"
-            else:
-                experiment_id = f"{subject_id}-v{scan_age}-{modality}"
-                
+                                          df_subject_visit)
             if xnat_subject is not None:
+                cog_values = find_cog_scores(
+                    subject_id,
+                    scan_age, 
+                    df_visit,
+                    df_cdr,
+                    df_mmse
+                    )
+                
+                if modality=="PET":
+                    radiopharm = image_type.replace("11CPiB","PIB")
+                    radiopharm = image_type.replace("18FMK6240","MK6240")
+                    radiopharm = image_type.replace("18FNAV4694","NAV4694")
+                    experiment_id = f"{subject_id}-v{scan_age}-{modality}-{radiopharm}"
+                else:
+                    experiment_id = f"{subject_id}-v{scan_age}-{modality}"
+                    
                 experiment = create_experiment(xnat_session,
                                                xnat_subject,
                                                modality,
